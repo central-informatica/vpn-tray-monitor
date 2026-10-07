@@ -1,7 +1,7 @@
 # VPN Monitor v2 — Desenho
 
 - **Data:** 2026-10-07
-- **Status:** aprovado em conversa; aguardando revisão do texto
+- **Status:** aprovado; revisado (ajustes da revisão técnica incorporados)
 - **Substitui:** a versão inicial (commit `997007a`), um app de bandeja único
 
 ## 1. Objetivo
@@ -20,7 +20,7 @@ GitHub a cada tag.
 3. O serviço não trava: toda operação externa tem prazo; parada em ≤10 s.
 4. A bandeja mostra o estado real em tempo real, emite balões reais e permite
    gerenciar as VPNs (inclusive editar alvos e intervalos) sem editar JSON.
-5. Todos os problemas listados na seção 13 estão corrigidos e cobertos por teste.
+5. Todos os problemas listados na seção 14 estão corrigidos e cobertos por teste.
 6. CI verde em Linux e Windows, com e2e do MSI; tag `v*` publica a release.
 
 ### Fora do escopo
@@ -152,16 +152,34 @@ próxima observação.
    `failuresBeforeReconnect`, o túnel é zumbi: `RasHangUp` seguido de discagem.
 4. Após discagem bem-sucedida, aguarda `graceAfterConnectSeconds` antes de
    voltar a contar falhas de alcance.
-5. Sem nenhuma interface com rota padrão: `SemRede`, sem discar e sem gastar
-   backoff; um aviso de mudança de rede reavalia.
+5. Sem nenhuma interface **física** (excluindo PPP/RAS e túneis) com rota
+   padrão: `SemRede`, sem discar e sem gastar backoff; um aviso de mudança de
+   rede reavalia.
 
 ### 4.4 Discagem
 
-- `RasDialW` em modo assíncrono, com callback mínimo; o supervisor acompanha com
+- `RasDialW` em modo assíncrono; o supervisor acompanha com
   `RasGetConnectStatus` a cada 250 ms.
+- Regras do callback: **um único** `windows.NewCallback` global criado na
+  inicialização (callbacks nunca são liberados e têm limite); o callback não
+  faz nada além de retornar; `RasHangUp` nunca é chamado de dentro dele; todos
+  os buffers passados ao `RasDialW` ficam vivos (`runtime.KeepAlive`) até a
+  discagem terminar.
+- Todas as funções RAS são carregadas via `windows.NewLazySystemDLL("rasapi32.dll")`
+  (o `x/sys` não as expõe).
 - Timeout (`connectTimeoutSeconds`, padrão 60) ou parada do serviço → `RasHangUp`
   e espera o handle ser liberado.
-- **Fila global com uma discagem por vez** entre todas as VPNs.
+- **Fila global com uma discagem por vez** entre todas as VPNs. Pedidos manuais
+  (`reconnect`) entram na frente da fila. Uma VPN com servidor morto pode
+  ocupar a fila por até `connectTimeoutSeconds`; isso é aceito e documentado.
+- **Catálogo:** o serviço (LocalSystem) só enxerga o catálogo de todos os
+  usuários, `%ProgramData%\Microsoft\Network\Connections\Pbk\rasphone.pbk`.
+  Entradas criadas só para um usuário não existem para ele. `listRasEntries`
+  lê apenas esse catálogo, e o `ErroConfig` de entrada inexistente sugere
+  recriá-la com `Add-VpnConnection -AllUserConnection`.
+- **Credencial salva no Windows:** desde o Vista, `RasGetEntryDialParams`
+  devolve um marcador da senha salva, não a senha. O marcador é repassado ao
+  `RasDialW` intacto e nunca é tratado como `Secret` nem comparado.
 - Estruturas RAS (`RASDIALPARAMSW`, `RASCONNSTATUSW`, `RASCONNW` etc.) montadas
   byte a byte com empacotamento de 4 bytes (`pshpack4` do `ras.h`); tamanhos e
   deslocamentos fixados por teste.
@@ -172,20 +190,25 @@ próxima observação.
 
 | Classe | Exemplos | Comportamento |
 |---|---|---|
-| Transitório | 600–699 não listados abaixo, 800, 809, 868, timeouts | backoff exponencial com jitter (±20%), do intervalo até `maxBackoffSeconds` |
-| Credencial | 691, 718, 917, 919 | `CredencialInvalida`; para até a credencial mudar ou pedido manual |
-| Configuração | 623, 703, 720, 735 | `ErroConfig`; para até a config mudar ou pedido manual |
+| Transitório | 718 (PPP sem resposta), 800, 809, 868, timeouts e todo código não listado | backoff exponencial com jitter (±20%), do intervalo até `maxBackoffSeconds` |
+| Credencial/autorização | 691 (usuário/senha), 646 (horário de logon restrito), 647 (conta desativada), 648 (senha expirada), 649 (sem permissão de discagem), 812 (política do NPS) | `CredencialInvalida`; ver §4.7 |
+| Configuração | 623 (entrada inexistente), 703 (exige interação), 720 (protocolo PPP), 735, 13801 e 13806 (certificado IKE), 13868 (política IKE) | `ErroConfig`; para até a config mudar ou pedido manual |
+| Já discando | 756 | não é falha: aguarda o fim da discagem em curso (de outro processo) e reavalia o enlace no ciclo seguinte |
 
-A tabela de códigos fica num único arquivo com teste. Códigos desconhecidos
-contam como transitórios.
+A tabela fica num único arquivo; cada código é uma constante nomeada com o nome
+do `raserror.h`/`winerror.h` e um teste fixa código → constante → classe.
 
 ### 4.6 Despertares
 
 - Timer do próximo ciclo.
 - `RasConnectionNotification` (evento de desconexão de qualquer entrada).
-- `NotifyAddrChange` (mudança de endereços).
-- `SERVICE_CONTROL_POWEREVENT` com `PBT_APMRESUMEAUTOMATIC`: zera o backoff e
-  verifica após 5 s.
+- `NotifyUnicastIpAddressChange` e `NotifyRouteChange2` (mudanças de endereço e
+  rota), com espera de 2 s após a última notificação, porque a própria
+  discagem gera uma rajada delas.
+- Retomada de energia: `SERVICE_CONTROL_POWEREVENT` com `PBT_APMRESUMEAUTOMATIC`
+  **ou** salto de relógio (diferença entre relógio de parede e monotônico maior
+  que 2× o intervalo, para cobrir o modern standby, que nem sempre avisa). Zera
+  o backoff e verifica após 5 s.
 
 Despertares se agregam: vários pendentes geram um só ciclo.
 
@@ -195,7 +218,16 @@ Despertares se agregam: vários pendentes geram um só ciclo.
   A pausa temporária expira sozinha; o estado de pausa persiste em `state.json`.
 - `reconnect` durante a pausa responde erro "pausada", sem mudar o estado.
 - `reconnect` com discagem em andamento responde "já reconectando".
-- `reconnect` em `CredencialInvalida` ou `ErroConfig` faz uma tentativa.
+- `reconnect` em `ErroConfig` faz uma tentativa.
+- `reconnect` em `CredencialInvalida` faz uma tentativa **só se** a credencial
+  mudou desde a rejeição (impressão digital do arquivo do cofre ou do marcador
+  do Windows) **ou** se passaram 15 min desde a última tentativa manual com a
+  mesma credencial. Caso contrário responde "credencial já rejeitada; tente
+  novamente em N min ou atualize a credencial". Isso impede que cliques
+  repetidos bloqueiem a conta no AD.
+- Pausa e estados bloqueados: `pause` vale em qualquer estado. Em `resume`, o
+  supervisor volta ao estado bloqueado anterior (`CredencialInvalida` ou
+  `ErroConfig`) se a causa não mudou; senão, volta a `Desconhecido` e verifica.
 
 ### 4.8 Avisos
 
@@ -274,9 +306,13 @@ logs\vpnmon.log, vpnmon.1.log … vpnmon.5.log
 - Gravação sempre atômica (temporário na mesma pasta, `fsync`, rename).
 - Alterações pela bandeja chegam como comandos pelo pipe; o serviço valida e
   grava. Uma config inválida nunca é gravada.
-- Edição manual: o serviço observa o arquivo e recarrega. Se inválido, mantém
-  a config anterior, registra no log e no Event Log e publica `configStatus`
-  com o motivo.
+- Edição manual: o serviço observa o arquivo e recarrega após 1 s sem novas
+  alterações, ignorando as próprias gravações (compara o hash do conteúdo com o
+  último gravado). Se inválido, mantém a config anterior, registra no log e no
+  Event Log e publica `configStatus` com o motivo.
+- `name` é imutável: `updateVpn` não renomeia. Renomear é remover e adicionar
+  de novo (a credencial precisa ser regravada). A janela de configurações deixa
+  o nome somente leitura para VPNs existentes.
 
 ### 5.3 Seed da instalação
 
@@ -296,8 +332,9 @@ gera uma config vazia válida (nenhuma VPN) e aguarda.
 - Gestão só pela CLI elevada:
   `credential set <vpn> --user X [--password-stdin]`, `credential clear <vpn>`,
   `credential list` (só mostra quais VPNs têm credencial).
-- A troca de credencial avisa o supervisor da VPN, que sai de
-  `CredencialInvalida`.
+- O serviço observa a pasta `credentials\` (só Administradores escrevem nela);
+  uma mudança no arquivo de uma VPN avisa o supervisor, que sai de
+  `CredencialInvalida` e verifica. Não há comando de pipe para isso.
 - Senhas trafegam no tipo `shared.Secret` (`String()` e JSON devolvem `***`);
   o buffer é zerado após a discagem.
 
@@ -320,6 +357,11 @@ Guarda pausas (`pausedUntil` ou indefinida) por VPN. Corrompido → renomeado pa
   `PIPE_REJECT_REMOTE_CLIENTS`.
 - SDDL: SYSTEM e Administradores com acesso total, Usuários Interativos (`IU`)
   com leitura e escrita, Rede (`NU`) negada.
+- O go-winio já cria o pipe com rejeição de clientes remotos e como primeira
+  instância (ninguém consegue criá-lo antes do serviço).
+- A bandeja e a CLI conferem que o servidor é o serviço: o PID de
+  `GetNamedPipeServerProcessId` tem de ser igual ao PID do serviço `VPNMonitor`
+  informado pelo SCM (`QueryServiceStatusEx`). Divergência → recusa a conexão.
 - Mensagem máxima de 64 KB; prazo de leitura e escrita; no máximo 32 conexões.
 - Decodificação estrita (campos desconhecidos são erro).
 - Cada conexão roda sob `recover`. Cliente que não consome eventos (fila de
@@ -389,7 +431,7 @@ runas, mora nele.
 ## 8. Serviço e CLI (`vpnmon-svc.exe`)
 
 - Nome `VPNMonitor`, início automático, dependência `RasMan`, conta LocalSystem.
-- Sinais aceitos: `stop`, `preshutdown`, `powerevent`, `sessionchange`.
+- Sinais aceitos: `stop`, `preshutdown`, `powerevent`.
 - Parada: encerra supervisores (cancela discagem com `RasHangUp`), envia
   `serviceStopping`, fecha o pipe, grava estado. Prazo total de 10 s.
   **Não derruba VPNs conectadas.**
@@ -398,22 +440,33 @@ runas, mora nele.
 ```
 vpnmon-svc run                      modo console, para depurar
 vpnmon-svc status                   estado de cada VPN (via pipe)
-vpnmon-svc check <vpn>              verificação única, sem discar
+vpnmon-svc check <vpn>              verificação única, sem discar (no próprio processo)
+vpnmon-svc vpn add|remove|list      gerência de VPNs (via pipe; mesmos pedidos da bandeja)
 vpnmon-svc install | uninstall      registro manual do serviço (sem MSI)
-vpnmon-svc credential set|clear|list
+vpnmon-svc credential set|clear|list   (grava direto no cofre; o serviço percebe)
 vpnmon-svc config validate [arquivo]
 vpnmon-svc version
 ```
+
+`vpn add` aceita `--name`, `--entry`, `--check ping|tcp|link`, `--host`, `--port`
+e os intervalos; os valores omitidos usam os padrões da §5.2.
 
 ## 9. Instalador (WiX v5)
 
 - Por máquina, x64, Windows 10 1809+/11, Server 2019+.
 - `C:\Program Files\VPN Monitor\` com os dois exes, licença e README.
-- Serviço via `ServiceInstall`/`ServiceControl`; recuperação via
-  `util:ServiceConfig` (reiniciar após 5 s, 30 s, 60 s; zerar em 1 dia);
-  Event Log via `util:EventSource`; ACL da ProgramData via `util:PermissionEx`.
-- Bandeja no HKLM `Run`; na instalação interativa, opção "abrir agora".
-- Propriedades do seed (seção 5.3). Nenhuma custom action, nenhuma senha no MSI.
+- Serviço via `ServiceInstall`/`ServiceControl` nativos; recuperação via
+  `ServiceConfigFailureActions` nativo (reiniciar após 5 s, 30 s, 60 s; zerar
+  em 1 dia); ACL da ProgramData via `PermissionEx` nativo com
+  `Sddl="D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)"` (MsiLockPermissionsEx; o `P`
+  desliga a herança). Event Log via `util:EventSource` (só registro, sem CA).
+- **Nenhuma custom action própria.** A única CA usada é a padrão do WiX
+  `util:RemoveFolderEx`, condicionada a `PURGE=1` na desinstalação.
+- Bandeja no HKLM `Run`; ela abre no próximo login de cada usuário. O MSI não
+  abre a bandeja ao final (abriria elevada); o README orienta abrir pelo menu
+  Iniciar, que ganha um atalho.
+- Propriedades do seed (seção 5.3), todas `Secure="yes"` para valerem em
+  instalação gerenciada. Nenhuma senha no MSI.
 - `MajorUpgrade` com UpgradeCode fixo; downgrade bloqueado; ProgramData
   preservada no upgrade.
 - Desinstalação mantém a ProgramData; `PURGE=1` remove.
@@ -427,10 +480,10 @@ vpnmon-svc version
 |---|---|---|
 | lint | ubuntu | `gofmt`, `go mod tidy` sem diff, `go vet` (linux e `GOOS=windows`), `golangci-lint` com `.golangci.yml` |
 | security | ubuntu | `govulncheck`; CodeQL Go (também semanal) |
-| test-linux | ubuntu | `go test -race -shuffle=on`; cobertura ≥ 80% em `core/*`, `features/*/domain`, `features/*/service`, `features/tray/viewmodel`; resumo no job |
-| test-windows | windows | `go test -race ./...` incluindo adaptadores reais |
+| test-linux | ubuntu | `go test -race -shuffle=on`; cobertura ≥ 80% em `core/*`, `features/*/domain`, `features/*/service`, `features/tray/viewmodel`, **excluindo arquivos `*_windows.go`** (cobertos pelo job Windows); resumo no job |
+| test-windows | windows | `go test -race ./...` incluindo adaptadores reais (`-race` exige cgo: `CGO_ENABLED=1` com o gcc MinGW do runner; o build de produção segue `CGO_ENABLED=0`) |
 | build | windows | exes com `go-winres` (versão, manifest, ícone) + MSI sem assinatura; artefatos |
-| e2e | windows | roteiro da seção 10.3 |
+| e2e | windows | roteiro da seção 10.3; compila dois MSIs (versão `0.0.1-e2e` e `0.0.2-e2e`) para testar o upgrade |
 
 Concorrência por ramo com cancelamento; `permissions` mínimas; actions fixadas
 por SHA.
@@ -450,15 +503,20 @@ por SHA.
 
 ### 10.3 Roteiro e2e (Windows)
 
-1. Instala o MSI com `/qn VPN_ENTRY=… CHECK_HOST=…`.
-2. Confere serviço `Running`, ACL da ProgramData e config gerada pelo seed.
-3. Cria entrada com `Add-VpnConnection -AllUserConnection` apontando para
-   servidor inalcançável; adiciona pela CLI/pipe.
-4. Confere `Reconectando` → erro transitório → backoff crescente.
-5. Grava credencial pelo `credential set --password-stdin` e confere
+0. **Sonda:** confere que o serviço RasMan sobe e que `Add-VpnConnection`
+   funciona no runner. Se não, falha com mensagem clara ("runner sem RAS") em
+   vez de falhar nos passos seguintes de forma confusa.
+1. Cria a entrada com `Add-VpnConnection -AllUserConnection` apontando para um
+   servidor inalcançável (TEST-NET, 192.0.2.1).
+2. Instala o MSI 0.0.1 com `/qn VPN_ENTRY=… CHECK_HOST=…` apontando para ela.
+3. Confere serviço `Running`, ACL da ProgramData e config gerada pelo seed.
+4. Confere pelo `vpnmon-svc status` a sequência `Reconectando` → erro
+   transitório → backoff crescente. Adiciona uma segunda VPN com
+   `vpnmon-svc vpn add --check link` e confere que ela aparece.
+5. Grava credencial com `credential set --password-stdin`; confere
    `credential list`.
-6. Para o serviço; confere parada ≤ 10 s.
-7. Instala uma versão maior por cima; confere config preservada.
+6. Para o serviço; confere parada ≤ 10 s. Inicia de novo.
+7. Instala o MSI 0.0.2 por cima; confere config e credencial preservadas.
 8. Desinstala; confere ProgramData preservada. Reinstala e desinstala com
    `PURGE=1`; confere remoção.
 
@@ -504,7 +562,23 @@ por SHA.
 - Escritas atômicas; ACLs verificadas a cada início; estado corrompido isolado.
 - Nenhum segredo em log, erro ou protocolo.
 
-## 13. Problemas da v1 e como a v2 os trata
+## 13. Marcos de entrega
+
+O escopo é grande demais para um plano só. São três marcos, cada um com plano
+próprio e entrega testável:
+
+1. **Marco A, núcleo e serviço:** `shared`, `core/config`, `core/logging`,
+   `core/platform` (RAS, ICMP, DPAPI, svc, netwatch, acl + fakes),
+   `features/monitor`, `features/credentials`, servidor IPC e `vpnmon-svc`
+   com toda a CLI. Entrega: serviço instalável por `vpnmon-svc install`,
+   operável pela CLI, com testes de unidade e integração.
+2. **Marco B, bandeja:** cliente IPC, `features/tray` (viewmodel, view walk,
+   janela de configurações, balões), `vpnmon-tray`.
+3. **Marco C, distribuição:** MSI, `ci.yml` completo, e2e, `release.yml`,
+   gancho de assinatura, README, `docs/TESTE-MANUAL.md`. Um `ci.yml` mínimo
+   (lint + testes) entra já no Marco A.
+
+## 14. Problemas da v1 e como a v2 os trata
 
 | # | Problema da v1 | Na v2 |
 |---|---|---|
