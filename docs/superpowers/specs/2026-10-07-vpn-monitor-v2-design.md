@@ -179,7 +179,8 @@ próxima observação.
   recriá-la com `Add-VpnConnection -AllUserConnection`.
 - **Credencial salva no Windows:** desde o Vista, `RasGetEntryDialParams`
   devolve um marcador da senha salva, não a senha. O marcador é repassado ao
-  `RasDialW` intacto e nunca é tratado como `Secret` nem comparado.
+  `RasDialW` intacto e nunca é tratado como `Secret`. A única comparação feita
+  é de um hash dele (§4.7), que nunca vai para log nem para o protocolo.
 - Estruturas RAS (`RASDIALPARAMSW`, `RASCONNSTATUSW`, `RASCONNW` etc.) montadas
   byte a byte com empacotamento de 4 bytes (`pshpack4` do `ras.h`); tamanhos e
   deslocamentos fixados por teste.
@@ -483,7 +484,7 @@ e os intervalos; os valores omitidos usam os padrões da §5.2.
 | test-linux | ubuntu | `go test -race -shuffle=on`; cobertura ≥ 80% em `core/*`, `features/*/domain`, `features/*/service`, `features/tray/viewmodel`, **excluindo arquivos `*_windows.go`** (cobertos pelo job Windows); resumo no job |
 | test-windows | windows | `go test -race ./...` incluindo adaptadores reais (`-race` exige cgo: `CGO_ENABLED=1` com o gcc MinGW do runner; o build de produção segue `CGO_ENABLED=0`) |
 | build | windows | exes com `go-winres` (versão, manifest, ícone) + MSI sem assinatura; artefatos |
-| e2e | windows | roteiro da seção 10.3; compila dois MSIs (versão `0.0.1-e2e` e `0.0.2-e2e`) para testar o upgrade |
+| e2e | windows | roteiro da seção 10.3; compila dois MSIs (`ProductVersion` 0.0.199 e 0.0.299, ver §10.2) para testar o upgrade |
 
 Concorrência por ramo com cancelamento; `permissions` mínimas; actions fixadas
 por SHA.
@@ -491,14 +492,21 @@ por SHA.
 ### 10.2 `release.yml` (tag `v*`)
 
 1. Valida semver e que o commit está no `main`; roda o CI como pré-requisito.
-2. Build reproduzível (`-trimpath`, `-buildid=`, `SOURCE_DATE_EPOCH`), versão,
+2. **Versão:** a tag `vX.Y.Z[-rc.N]` vira `ProductVersion` do MSI
+   `X.Y.(Z×100 + N)` para rc (N de 1 a 98) e `X.Y.(Z×100 + 99)` para a final,
+   de modo que uma rc é sempre menor que a final da mesma versão e o
+   `MajorUpgrade` (que compara só os três campos) funciona. Limites validados:
+   X ≤ 255, Y ≤ 255, Z ≤ 654, N ≤ 98. A versão semver completa vai nos
+   recursos do exe, no nome dos arquivos e em `version`. Um teste fixa a
+   conversão.
+3. Build reproduzível (`-trimpath`, `-buildid=`, `SOURCE_DATE_EPOCH`), versão,
    commit e data via `-ldflags`.
-3. Passo `sign` (exes e depois MSI) em environment `release`, executado só com
+4. Passo `sign` (exes e depois MSI) em environment `release`, executado só com
    `vars.SIGNING_ENABLED == 'true'`; chama `scripts/sign.ps1`, entregue como
    esqueleto documentado com exemplo de `signtool /dlib` para HSM.
-4. `SHA256SUMS`, SBOM CycloneDX (syft), `actions/attest-build-provenance`.
-5. Notas por `git-cliff` (commits convencionais, `cliff.toml`).
-6. GitHub Release com MSI, zip portátil, somas, SBOM e notas. Tags `-rc.N` saem
+5. `SHA256SUMS`, SBOM CycloneDX (syft), `actions/attest-build-provenance`.
+6. Notas por `git-cliff` (commits convencionais, `cliff.toml`).
+7. GitHub Release com MSI, zip portátil, somas, SBOM e notas. Tags `-rc.N` saem
    como pré-release. Sem assinatura, as notas dizem "binários não assinados".
 
 ### 10.3 Roteiro e2e (Windows)
@@ -508,7 +516,7 @@ por SHA.
    vez de falhar nos passos seguintes de forma confusa.
 1. Cria a entrada com `Add-VpnConnection -AllUserConnection` apontando para um
    servidor inalcançável (TEST-NET, 192.0.2.1).
-2. Instala o MSI 0.0.1 com `/qn VPN_ENTRY=… CHECK_HOST=…` apontando para ela.
+2. Instala o MSI 0.0.199 com `/qn VPN_ENTRY=… CHECK_HOST=…` apontando para ela.
 3. Confere serviço `Running`, ACL da ProgramData e config gerada pelo seed.
 4. Confere pelo `vpnmon-svc status` a sequência `Reconectando` → erro
    transitório → backoff crescente. Adiciona uma segunda VPN com
@@ -516,7 +524,7 @@ por SHA.
 5. Grava credencial com `credential set --password-stdin`; confere
    `credential list`.
 6. Para o serviço; confere parada ≤ 10 s. Inicia de novo.
-7. Instala o MSI 0.0.2 por cima; confere config e credencial preservadas.
+7. Instala o MSI 0.0.299 por cima; confere config e credencial preservadas.
 8. Desinstala; confere ProgramData preservada. Reinstala e desinstala com
    `PURGE=1`; confere remoção.
 
