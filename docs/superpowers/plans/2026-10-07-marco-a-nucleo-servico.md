@@ -20,9 +20,9 @@
 - Tabela de erros RAS num único arquivo (`internal/core/platform/ras/codes.go`), cada código como constante com o nome do `raserror.h`/`winerror.h`; código não listado é transitório.
 - Backoff exponencial com jitter de ±20 %, do `intervalSeconds` até `maxBackoffSeconds`.
 - Padrões e limites da config (§5.2): `check.kind` ping|tcp|link (padrão ping); `check.timeoutSeconds` 5 (1–30); `intervalSeconds` 30 (5–3600); `failuresBeforeReconnect` 3 (1–20); `graceAfterConnectSeconds` 15 (0–300); `connectTimeoutSeconds` 60 (10–300); `maxBackoffSeconds` 300 (≥ `intervalSeconds`, ≤ 3600); `name` 1–64 caracteres, único sem diferenciar maiúsculas e imutável.
-- Pasta `C:\ProgramData\VPNMonitor\` com `config.json`, `state.json`, `credentials\<id>.bin`, `logs\vpnmon.log` (+ `.1`…`.5`); ACL `D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)`, verificada e corrigida a cada início.
-- Pipe `\\.\pipe\vpnmon`: JSON por linha `{"v":1,"id":"…","type":"…","payload":{…}}`, mensagem máxima de 64 KB, no máximo 32 conexões, decodificação estrita, SDDL com SYSTEM/Administradores total, Usuários Interativos leitura e escrita, Rede negada; cliente confere o PID do servidor contra o do serviço `VPNMonitor`.
-- Serviço `VPNMonitor`: início automático, dependência `RasMan`, LocalSystem; aceita `stop`, `preshutdown`, `powerevent`; parada em ≤ 10 s; **parar, atualizar ou remover nunca derruba VPN conectada**.
+- Pasta `C:\ProgramData\VPNMonitor\` com `config.json`, `state.json`, `credentials\<id>.bin`, `logs\vpnmon.log` (+ `.1`…`.5`); dono Administradores e ACL `D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)`, verificados e corrigidos a cada início.
+- Pipe `\\.\pipe\vpnmon`: JSON por linha `{"v":1,"id":"…","type":"…","payload":{…}}`, mensagem máxima de 64 KB, no máximo 32 conexões, decodificação estrita, SDDL com SYSTEM/Administradores total, Usuários Interativos leitura e escrita **sem** criar instância (`0x0012019b`), Rede negada; conexão ociosa sem inscrição fecha em 2 min; cliente confere o PID do servidor contra o do serviço `VPNMonitor`.
+- Serviço `VPNMonitor`: início automático, dependência `RasMan`, LocalSystem; aceita `stop`, `preshutdown`, `powerevent`; parada em ≤ 10 s (supervisores têm prazo global de 7 s e o estado é gravado mesmo que algum não volte); **parar, atualizar ou remover nunca derruba VPN conectada**.
 - Nenhum segredo em log, erro ou protocolo: senhas em `shared.Secret`; o marcador da senha salva no Windows nunca é `Secret` nem é logado — só o hash dele é comparado.
 - Textos ao usuário em português; commits convencionais em pt-BR; nada de dados de cliente no repositório.
 
@@ -67,7 +67,11 @@ Makefile, .github/workflows/ci.yml, README.md
 - **Seed lido por `config.ReadSeedRegistry`** (`x/sys/windows/registry`), injetado como `config.SeedReader`.
 - **Config inválida no início** (sem anterior para manter): o serviço sobe sem VPNs, registra no log e no Event Log e espera o arquivo ser corrigido — não sobrescreve.
 - **`Desconectada` × `Reconectando`**: `Reconectando` cobre "discando" e "aguardando a próxima tentativa após falha" (como no menu da §7); `Desconectada` é o enlace visto caído enquanto o backoff ainda não permite discar.
-- **15 min de `reconnect` em `CredencialInvalida`** contam da tentativa mais recente — manual ou a rejeição automática.
+- **15 min de `reconnect` em `CredencialInvalida`** contam da tentativa mais recente — manual ou a rejeição automática (a §4.7 do spec foi ajustada junto).
+- **O pipe é a trava de instância única** e é aberto antes de tudo na subida.
+- **Dono da pasta de dados = Administradores** (além da DACL), para quem pré-criar a pasta não manter `WRITE_DAC`.
+- **Mudanças pelo pipe são recusadas enquanto o `config.json` em disco estiver inválido.**
+- **Conexões ociosas não inscritas** fecham em 2 min.
 
 ## Como verificar cada tarefa
 
@@ -132,6 +136,7 @@ go build ./... 2>&1 | head -3   # esperado: nada a compilar além de tools/genic
 package shared
 
 import (
+	"strings"
 	"testing"
 	"time"
 )
@@ -236,6 +241,23 @@ func TestFakeClockWaitForDeadline(t *testing.T) {
 	}
 }
 
+func TestResumeDetectorIgnoresMonotonicReading(t *testing.T) {
+	d := ResumeDetector{Period: 5 * time.Second, Threshold: time.Minute}
+	now := time.Now() // com leitura monotônica, como o RealClock devolve
+	d.Observe(now)
+	if strings.Contains(d.last.String(), "m=") {
+		t.Fatalf("o detector deve guardar só a parede, guardou %s", d.last)
+	}
+	// Após uma suspensão real, a parede pulou e a leitura monotônica não; um
+	// tempo só-parede no futuro reproduz isso para a comparação feita.
+	if !d.Observe(now.Round(0).Add(2 * time.Hour)) {
+		t.Fatal("salto de parede de 2 h deveria ser detectado")
+	}
+	if d.Observe(time.Now().Add(2*time.Hour + 5*time.Second)) {
+		t.Fatal("tique normal (com leitura monotônica) após o salto não é salto")
+	}
+}
+
 func TestResumeDetector(t *testing.T) {
 	d := ResumeDetector{Period: 5 * time.Second, Threshold: 60 * time.Second}
 	if d.Observe(t0) {
@@ -269,7 +291,8 @@ Expected: FAIL — `undefined: NewFakeClock` (o pacote ainda não existe).
 
 `clock.go` separa relógio de parede e tempo dos temporizadores para simular suspensão. `ResumeDetector` implementa o "salto de
 relógio" da §4.6 de forma robusta à semântica do relógio monotônico no Windows: num tique periódico, se o relógio de parede andou mais que
-`Period + Threshold`, a máquina dormiu. Relógio voltando (NTP) nunca é salto.
+`Period + Threshold`, a máquina dormiu. A comparação descarta a leitura monotônica (`Round(0)`): com ela, `t.Sub(u)` usaria o
+relógio monotônico, que não anda na suspensão, e o salto nunca apareceria com o `RealClock`. Relógio voltando (NTP) nunca é salto.
 
 As actions do CI estão fixadas por SHA (conferido com `git ls-remote --tags`: checkout `v7.0.1` = `3d3c42e5…`, setup-go `v7.0.0` = `b7ad1dad…`).
 
@@ -318,7 +341,8 @@ func (r realTimer) Reset(d time.Duration) { r.t.Reset(d) }
 
 // FakeClock é um relógio manual para testes. Ele separa o relógio de parede
 // do tempo que os temporizadores enxergam, para simular suspensão: Advance
-// move os dois; Suspend move só o de parede.
+// move os dois; Suspend move só o de parede. Now devolve tempos sem leitura
+// monotônica (só parede), que é o que ResumeDetector compara.
 type FakeClock struct {
 	mu      sync.Mutex
 	wall    time.Time
@@ -499,6 +523,11 @@ func (t *fakeTimer) Reset(d time.Duration) {
 // (medido pelo relógio monotônico dos temporizadores) chega e o relógio de
 // parede avançou bem mais que o período. Cobre o modern standby, que nem
 // sempre avisa o serviço com PBT_APMRESUMEAUTOMATIC.
+//
+// A comparação é só de parede: time.Now() carrega também a leitura
+// monotônica, e t.Sub(u) usaria ela — que não anda durante a suspensão —
+// escondendo justamente o salto. Por isso Observe descarta a leitura
+// monotônica com Round(0).
 type ResumeDetector struct {
 	Period    time.Duration // período do tique
 	Threshold time.Duration // folga além do período que caracteriza suspensão
@@ -507,6 +536,7 @@ type ResumeDetector struct {
 
 // Observe registra um tique no instante de parede now e diz se houve salto.
 func (d *ResumeDetector) Observe(now time.Time) bool {
+	now = now.Round(0) // só relógio de parede
 	if d.last.IsZero() {
 		d.last = now
 		return false
@@ -3689,7 +3719,8 @@ type Client interface {
 `internal/core/platform/ras/ras_windows.go`: Implementação real. **Não roda no Linux**: aqui só compila (`GOOS=windows go vet`). Pontos da §4.4 que o revisor deve conferir:
 `dialCallback` é o único `windows.NewCallback`, criado na inicialização do pacote e sem fazer nada; `RasHangUp` nunca é chamado do callback;
 o buffer do `RasDialW` fica no mapa `pending` (vivo) até `Status` ver o fim ou `HangUp`; `HangUp` espera o handle ser liberado
-(`ERROR_INVALID_HANDLE`) por até 3 s; tudo via `NewLazySystemDLL("rasapi32.dll")`.
+(`ERROR_INVALID_HANDLE`) por até 3 s; tudo via `NewLazySystemDLL("rasapi32.dll")`; o catálogo de todos os usuários é passado
+**explicitamente** (não `NULL`) ao `RasDialW` e ao `RasGetEntryDialParamsW`.
 
 ```go
 //go:build windows
@@ -3735,7 +3766,11 @@ const (
 var dialCallback = windows.NewCallback(func(msg, state, code uintptr) uintptr { return 0 })
 
 type winClient struct {
+	// phonebook é passado explicitamente ao RasDialW e ao
+	// RasGetEntryDialParamsW: com NULL o Windows escolheria o catálogo
+	// "padrão" do contexto, que não é garantidamente o de todos os usuários.
 	phonebook string
+	pbPtr     *uint16
 	mu        sync.Mutex
 	// pending mantém vivos os buffers passados ao RasDialW até a discagem
 	// terminar (conectada, falha ou hangup).
@@ -3760,7 +3795,11 @@ func NewClient() (Client, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &winClient{phonebook: pb, pending: map[Handle]DialParams{}}, nil
+	ptr, err := windows.UTF16PtrFromString(pb)
+	if err != nil {
+		return nil, err
+	}
+	return &winClient{phonebook: pb, pbPtr: ptr, pending: map[Handle]DialParams{}}, nil
 }
 
 func (c *winClient) Entries() ([]string, error) {
@@ -3856,7 +3895,7 @@ func (c *winClient) StartDial(req DialRequest) (Handle, error) {
 			return 0, err
 		}
 		var h uintptr
-		r, _, _ := procRasDialW.Call(0, 0, uintptr(unsafe.Pointer(&p[0])),
+		r, _, _ := procRasDialW.Call(0, uintptr(unsafe.Pointer(c.pbPtr)), uintptr(unsafe.Pointer(&p[0])),
 			notifierRasDialFunc, dialCallback, uintptr(unsafe.Pointer(&h)))
 		if r == 0 {
 			c.mu.Lock()
@@ -3902,7 +3941,7 @@ func (c *winClient) Saved(entry string) (*Saved, error) {
 			return nil, err
 		}
 		var hasPassword int32
-		r, _, _ := procRasGetEntryDialParamsW.Call(0, uintptr(unsafe.Pointer(&p[0])), uintptr(unsafe.Pointer(&hasPassword)))
+		r, _, _ := procRasGetEntryDialParamsW.Call(uintptr(unsafe.Pointer(c.pbPtr)), uintptr(unsafe.Pointer(&p[0])), uintptr(unsafe.Pointer(&hasPassword)))
 		if r == 0 {
 			s := NewSaved(p, hasPassword != 0)
 			p.Wipe()
@@ -4322,7 +4361,7 @@ git add internal/core/platform && git commit -m "feat(ras): cliente RAS assíncr
 - Produces: `icmp.Pinger` (`Ping(ctx, host string, timeout) (icmp.Result{OK bool; RTT time.Duration; Status uint32}, error)`), `icmp.New() Pinger`,
   `icmp.DecodeReply([]byte) Result`, `icmp.IPv4ToUint32(net.IP)`, `icmp.ResolveIPv4(ctx, host)`, `icmp.IP_SUCCESS`, `icmp.IP_REQ_TIMED_OUT`…;
   `dpapi.Protector` (`Protect(plain, entropy)`, `Unprotect(blob, entropy)`), `dpapi.New() Protector`;
-  `fake.NewPinger() *fake.Pinger` (`SetReachable(host, ok)`, `SetError(host, err)`, `SetBlock(bool)`, `Calls() int`, campo `RTT` = 12 ms); `fake.DPAPI{}`.
+  `fake.NewPinger() *fake.Pinger` (`SetReachable(host, ok)`, `SetError(host, err)`, `SetBlock(bool)` (espera o ctx), `SetHang(bool)` (trava ignorando o ctx, como o `IcmpSendEcho2` real), `Calls() int`, campo `RTT` = 12 ms); `fake.DPAPI{}`.
 
 - [ ] **Step 1: Escrever o teste que falha**
 
@@ -4402,6 +4441,17 @@ func TestFakePinger(t *testing.T) {
 	if p.Calls() != 3 {
 		t.Fatal(p.Calls())
 	}
+	p.SetBlock(false)
+	p.SetHang(true)
+	done := make(chan struct{})
+	go func() { p.Ping(context.Background(), "10.0.0.1", time.Second); close(done) }()
+	select {
+	case <-done:
+		t.Fatal("SetHang deveria travar o Ping")
+	case <-time.After(20 * time.Millisecond):
+	}
+	p.SetHang(false)
+	<-done
 }
 
 func TestFakeDPAPI(t *testing.T) {
@@ -4751,6 +4801,7 @@ type Pinger struct {
 	reachable map[string]bool
 	errs      map[string]error
 	block     bool
+	hang      chan struct{}
 	calls     int
 	// RTT devolvido nos sucessos.
 	RTT time.Duration
@@ -4782,6 +4833,20 @@ func (p *Pinger) SetBlock(b bool) {
 	p.block = b
 }
 
+// SetHang(true) faz Ping travar ignorando o ctx, como o IcmpSendEcho2 real
+// (síncrono); SetHang(false) solta as chamadas presas.
+func (p *Pinger) SetHang(h bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if h && p.hang == nil {
+		p.hang = make(chan struct{})
+	}
+	if !h && p.hang != nil {
+		close(p.hang)
+		p.hang = nil
+	}
+}
+
 // Calls conta as chamadas.
 func (p *Pinger) Calls() int {
 	p.mu.Lock()
@@ -4792,8 +4857,11 @@ func (p *Pinger) Calls() int {
 func (p *Pinger) Ping(ctx context.Context, host string, _ time.Duration) (icmp.Result, error) {
 	p.mu.Lock()
 	p.calls++
-	block, err, ok, rtt := p.block, p.errs[host], p.reachable[host], p.RTT
+	block, hang, err, ok, rtt := p.block, p.hang, p.errs[host], p.reachable[host], p.RTT
 	p.mu.Unlock()
+	if hang != nil {
+		<-hang
+	}
 	if block {
 		<-ctx.Done()
 		return icmp.Result{}, ctx.Err()
@@ -4895,7 +4963,7 @@ git add internal/core/platform && git commit -m "feat(platform): eco ICMP pelo I
 - Produces: `netwatch.Watcher` (`Changes() <-chan struct{}`, `HasPhysicalDefaultRoute() (bool, error)`, `Close()`), `netwatch.New()`,
   `netwatch.Route{PrefixLen uint8; IfType uint32; OperUp bool}`, `netwatch.HasPhysicalDefault([]Route) bool`, `netwatch.IsVirtualIfType(uint32) bool`,
   `netwatch.Debounce(ctx, clock, in <-chan struct{}, quiet) <-chan struct{}`, `netwatch.DefaultQuiet = 2s`;
-  `acl.Securer` (`EnsureDir(path) (changed bool, err error)`), `acl.New()`, `acl.DirSDDL`, `acl.DACLMatches(sddl) bool`;
+  `acl.Securer` (`EnsureDir(path) (changed bool, err error)`), `acl.New()`, `acl.DirSDDL = "O:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)"`, `acl.Matches(sddl) bool` (dono e DACL);
   `fake.NewNet() *fake.Net` (`SetPhysical(bool)` também emite aviso), `fake.ACL{Dirs []string}`.
 
 - [ ] **Step 1: Escrever o teste que falha**
@@ -4972,20 +5040,22 @@ package acl
 
 import "testing"
 
-func TestDACLMatches(t *testing.T) {
+func TestMatches(t *testing.T) {
 	cases := map[string]bool{
 		DirSDDL: true,
-		"O:BAG:SYD:PAI(A;OICI;FA;;;BA)(A;OICI;FA;;;SY)":             true,
-		"D:PAI(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)S:AI":                 true,
-		"D:AI(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)":                      false, // herança ligada
-		"D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1200a9;;;BU)": false, // usuários lendo
-		"D:P(A;OICI;FA;;;SY)":                                       false,
-		"O:BA":                                                      false,
-		"D:P":                                                       false,
+		"O:BAG:SYD:PAI(A;OICI;FA;;;BA)(A;OICI;FA;;;SY)":                 true,
+		"O:BAD:PAI(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)S:AI":                 true,
+		"D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)":                           false, // sem dono
+		"O:S-1-5-21-1-2-3-1001D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)":      false, // usuário que pré-criou é dono
+		"O:BAD:AI(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)":                      false, // herança ligada
+		"O:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1200a9;;;BU)": false, // usuários lendo
+		"O:BAD:P(A;OICI;FA;;;SY)":                                       false,
+		"O:BA":                                                          false,
+		"O:BAD:P":                                                       false,
 	}
 	for in, want := range cases {
-		if got := DACLMatches(in); got != want {
-			t.Errorf("DACLMatches(%q) = %v, quer %v", in, got, want)
+		if got := Matches(in); got != want {
+			t.Errorf("Matches(%q) = %v, quer %v", in, got, want)
 		}
 	}
 }
@@ -4994,7 +5064,7 @@ func TestDACLMatches(t *testing.T) {
 - [ ] **Step 2: Rodar e confirmar a falha**
 
 Run: `go test ./internal/core/platform/...`  
-Expected: FAIL — `undefined: HasPhysicalDefault`, `undefined: DACLMatches`…
+Expected: FAIL — `undefined: HasPhysicalDefault`, `undefined: Matches`…
 
 - [ ] **Step 3: Implementar**
 
@@ -5211,8 +5281,9 @@ func TestWindowsHasPhysicalDefaultRoute(t *testing.T) {
 `internal/core/platform/acl/acl.go`:
 
 ```go
-// Package acl aplica e confere a ACL da pasta de dados (§5.1): SYSTEM e
-// Administradores com controle total, herança desligada, mais ninguém.
+// Package acl aplica e confere a segurança da pasta de dados (§5.1): dono
+// Administradores; SYSTEM e Administradores com controle total; herança
+// desligada; mais ninguém.
 package acl
 
 import (
@@ -5220,34 +5291,53 @@ import (
 	"strings"
 )
 
-// DirSDDL é a ACL da pasta (a mesma que o MSI aplica via PermissionEx).
-const DirSDDL = "D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)"
+// DirSDDL é o descritor da pasta. O dono (O:BA) importa: quem pré-cria a
+// pasta continua dono e, como dono, mantém WRITE_DAC mesmo fora da DACL.
+// A DACL é a mesma que o MSI aplica via PermissionEx.
+const DirSDDL = "O:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)"
 
 var wantACEs = []string{"A;OICI;FA;;;BA", "A;OICI;FA;;;SY"}
 
-// Securer garante a ACL de uma pasta.
+// Securer garante a segurança de uma pasta.
 type Securer interface {
-	// EnsureDir cria a pasta se preciso e corrige a ACL se divergir.
+	// EnsureDir cria a pasta se preciso e corrige dono e DACL se divergirem.
 	// changed=true quando precisou corrigir.
 	EnsureDir(path string) (changed bool, err error)
 }
 
-// DACLMatches confere o trecho D: de um SDDL: protegido (P) e exatamente
-// as ACEs de SYSTEM e Administradores, em qualquer ordem.
-func DACLMatches(sddl string) bool {
-	i := strings.Index(sddl, "D:")
+// section devolve o trecho de um SDDL que começa em tag ("O:", "D:") até a
+// próxima seção.
+func section(sddl, tag string) (string, bool) {
+	i := strings.Index(sddl, tag)
 	if i < 0 {
+		return "", false
+	}
+	s := sddl[i+len(tag):]
+	for _, next := range []string{"O:", "G:", "D:", "S:"} {
+		if next == tag {
+			continue
+		}
+		if j := strings.Index(s, next); j >= 0 {
+			s = s[:j] // as ACEs que o Windows produz não contêm essas marcas
+		}
+	}
+	return s, true
+}
+
+// Matches confere um SDDL com dono (O:) e DACL (D:): dono Administradores,
+// DACL protegida (P) e exatamente as ACEs de SYSTEM e Administradores, em
+// qualquer ordem.
+func Matches(sddl string) bool {
+	owner, ok := section(sddl, "O:")
+	if !ok || owner != "BA" {
 		return false
 	}
-	d := sddl[i+2:]
-	if j := strings.Index(d, "S:"); j >= 0 {
-		d = d[:j]
+	d, ok := section(sddl, "D:")
+	if !ok {
+		return false
 	}
 	open := strings.IndexByte(d, '(')
-	if open < 0 {
-		return false
-	}
-	if !strings.Contains(d[:open], "P") {
+	if open < 0 || !strings.Contains(d[:open], "P") {
 		return false
 	}
 	var aces []string
@@ -5269,7 +5359,7 @@ func DACLMatches(sddl string) bool {
 }
 ```
 
-`internal/core/platform/acl/acl_windows.go`: `SetNamedSecurityInfo` com `PROTECTED_DACL_SECURITY_INFORMATION` (desliga herança); só reaplica se `DACLMatches` falhar.
+`internal/core/platform/acl/acl_windows.go`: `SetNamedSecurityInfo` com `OWNER_SECURITY_INFORMATION` (dono = Administradores: quem pré-criar a pasta deixa de ser dono e perde o `WRITE_DAC` implícito) e `PROTECTED_DACL_SECURITY_INFORMATION` (desliga herança); só reaplica se `Matches` falhar.
 
 ```go
 //go:build windows
@@ -5292,14 +5382,19 @@ func (winSecurer) EnsureDir(path string) (bool, error) {
 	if err := os.MkdirAll(path, 0o700); err != nil {
 		return false, err
 	}
-	cur, err := windows.GetNamedSecurityInfo(path, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION)
+	cur, err := windows.GetNamedSecurityInfo(path, windows.SE_FILE_OBJECT,
+		windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION)
 	if err != nil {
-		return false, fmt.Errorf("lendo ACL de %s: %w", path, err)
+		return false, fmt.Errorf("lendo a segurança de %s: %w", path, err)
 	}
-	if DACLMatches(cur.String()) {
+	if Matches(cur.String()) {
 		return false, nil
 	}
 	sd, err := windows.SecurityDescriptorFromString(DirSDDL)
+	if err != nil {
+		return false, err
+	}
+	owner, _, err := sd.Owner()
 	if err != nil {
 		return false, err
 	}
@@ -5307,11 +5402,13 @@ func (winSecurer) EnsureDir(path string) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	// PROTECTED desliga a herança; o Windows propaga as ACEs OICI aos filhos.
+	// Dono = Administradores (tira o WRITE_DAC implícito de quem pré-criou a
+	// pasta); PROTECTED desliga a herança; o Windows propaga as ACEs OICI.
 	err = windows.SetNamedSecurityInfo(path, windows.SE_FILE_OBJECT,
-		windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION, nil, nil, dacl, nil)
+		windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION,
+		owner, nil, dacl, nil)
 	if err != nil {
-		return false, fmt.Errorf("aplicando ACL em %s: %w", path, err)
+		return false, fmt.Errorf("aplicando a segurança em %s: %w", path, err)
 	}
 	return true, nil
 }
@@ -5360,8 +5457,8 @@ import (
 	"golang.org/x/sys/windows"
 )
 
-// Só no job Windows (runner é administrador): aplica, confere, e a segunda
-// chamada não muda nada.
+// Só no job Windows (runner é administrador): aplica dono e DACL, confere,
+// e a segunda chamada não muda nada.
 func TestWindowsEnsureDir(t *testing.T) {
 	if !windows.GetCurrentProcessToken().IsElevated() {
 		t.Skip("exige processo elevado (o runner do CI é)")
@@ -5371,9 +5468,10 @@ func TestWindowsEnsureDir(t *testing.T) {
 	if err != nil || !changed {
 		t.Fatalf("primeira aplicação: %v %v", changed, err)
 	}
-	sd, err := windows.GetNamedSecurityInfo(dir, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION)
-	if err != nil || !DACLMatches(sd.String()) {
-		t.Fatalf("ACL resultante %v: %v", sd, err)
+	sd, err := windows.GetNamedSecurityInfo(dir, windows.SE_FILE_OBJECT,
+		windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION)
+	if err != nil || !Matches(sd.String()) {
+		t.Fatalf("segurança resultante %v: %v", sd, err)
 	}
 	if changed, err := New().EnsureDir(dir); err != nil || changed {
 		t.Fatalf("segunda chamada deveria ser no-op: %v %v", changed, err)
@@ -5677,7 +5775,10 @@ func Loop(h Hooks, reqs <-chan Request, report func(State)) uint32 {
 
 `internal/core/platform/svc/svc_windows.go`: Adaptador fino sobre `x/sys/windows/svc`: traduz `ChangeRequest` para `svc.Request` e estados para `svc.Status`
 (aceita `Stop|PreShutdown|PowerEvent`). `Install`: início automático, dependência `RasMan`, LocalSystem, recuperação 5 s/30 s/60 s zerando
-em 1 dia, origem do Event Log. `ServicePID` usa `SC_MANAGER_CONNECT` + `SERVICE_QUERY_STATUS` (funciona sem elevação; `mgr.Connect` exigiria administrador).
+em 1 dia, origem do Event Log. O `eventlog.InstallAsEventCreate` do x/sys devolve um erro **de texto** ("registry key already exists")
+quando a origem já existe (MSI ou install anterior) — `errors.Is(err, ERROR_ALREADY_EXISTS)` nunca casaria, por isso a checagem é por
+`strings.Contains`. `ServicePID` usa `SC_MANAGER_CONNECT` + `SERVICE_QUERY_STATUS` (funciona sem elevação; `mgr.Connect` exigiria
+administrador). As variantes `installNamed`/`uninstallNamed`/`servicePIDNamed`/`runNamed` existem para o teste usar outro nome.
 
 ```go
 //go:build windows
@@ -5685,8 +5786,8 @@ em 1 dia, origem do Event Log. `ServicePID` usa `SC_MANAGER_CONNECT` + `SERVICE_
 package svc
 
 import (
-	"errors"
 	"fmt"
+	"strings"
 	"time"
 	"unsafe"
 
@@ -5695,9 +5796,6 @@ import (
 	"golang.org/x/sys/windows/svc/eventlog"
 	"golang.org/x/sys/windows/svc/mgr"
 )
-
-// EventSource é a origem do Event Log registrada no install (igual a logging.EventSourceName).
-const EventSource = "VPNMonitor"
 
 const accepts = svc.AcceptStop | svc.AcceptPreShutdown | svc.AcceptPowerEvent
 
@@ -5749,27 +5847,33 @@ func (h handler) Execute(_ []string, r <-chan svc.ChangeRequest, s chan<- svc.St
 func IsService() (bool, error) { return svc.IsWindowsService() }
 
 // Run entrega o processo ao SCM.
-func Run(h Hooks) error { return svc.Run(ServiceName, handler{h}) }
+func Run(h Hooks) error { return runNamed(ServiceName, h) }
+
+func runNamed(name string, h Hooks) error { return svc.Run(name, handler{h}) }
 
 // Install registra o serviço (início automático, depende do RasMan,
 // LocalSystem, recuperação 5 s/30 s/60 s zerando em 1 dia) e a origem do
 // Event Log. É o caminho sem MSI.
 func Install(exePath string) error {
+	return installNamed(ServiceName, DisplayName, exePath, []string{"RasMan"})
+}
+
+func installNamed(name, display, exePath string, deps []string, args ...string) error {
 	m, err := mgr.Connect()
 	if err != nil {
 		return err
 	}
 	defer m.Disconnect()
-	if s, err := m.OpenService(ServiceName); err == nil {
+	if s, err := m.OpenService(name); err == nil {
 		s.Close()
-		return fmt.Errorf("o serviço %s já está instalado", ServiceName)
+		return fmt.Errorf("o serviço %s já está instalado", name)
 	}
-	s, err := m.CreateService(ServiceName, exePath, mgr.Config{
-		DisplayName:  DisplayName,
+	s, err := m.CreateService(name, exePath, mgr.Config{
+		DisplayName:  display,
 		Description:  Description,
 		StartType:    mgr.StartAutomatic,
-		Dependencies: []string{"RasMan"},
-	})
+		Dependencies: deps,
+	}, args...)
 	if err != nil {
 		return err
 	}
@@ -5782,23 +5886,28 @@ func Install(exePath string) error {
 	if err := s.SetRecoveryActions(actions, uint32((24 * time.Hour).Seconds())); err != nil {
 		return fmt.Errorf("configurando recuperação: %w", err)
 	}
-	if err := eventlog.InstallAsEventCreate(EventSource, eventlog.Error|eventlog.Warning|eventlog.Info); err != nil &&
-		!errors.Is(err, windows.ERROR_ALREADY_EXISTS) {
+	// O MSI (util:EventSource) ou um install anterior pode já ter registrado a
+	// origem; o x/sys devolve um erro de texto ("registry key already exists"),
+	// não ERROR_ALREADY_EXISTS, então a checagem é pelo texto.
+	if err := eventlog.InstallAsEventCreate(name, eventlog.Error|eventlog.Warning|eventlog.Info); err != nil &&
+		!strings.Contains(err.Error(), "already exists") {
 		return fmt.Errorf("registrando a origem do Event Log: %w", err)
 	}
 	return nil
 }
 
 // Uninstall para o serviço (sem derrubar VPNs) e remove o registro.
-func Uninstall() error {
+func Uninstall() error { return uninstallNamed(ServiceName) }
+
+func uninstallNamed(name string) error {
 	m, err := mgr.Connect()
 	if err != nil {
 		return err
 	}
 	defer m.Disconnect()
-	s, err := m.OpenService(ServiceName)
+	s, err := m.OpenService(name)
 	if err != nil {
-		return fmt.Errorf("o serviço %s não está instalado", ServiceName)
+		return fmt.Errorf("o serviço %s não está instalado", name)
 	}
 	defer s.Close()
 	if st, err := s.Query(); err == nil && st.State != svc.Stopped {
@@ -5812,21 +5921,23 @@ func Uninstall() error {
 	if err := s.Delete(); err != nil {
 		return err
 	}
-	_ = eventlog.Remove(EventSource)
+	_ = eventlog.Remove(name)
 	return nil
 }
 
 // ServicePID devolve o PID do serviço em execução, com acesso mínimo
 // (funciona sem elevação; usado pela bandeja e pela CLI para conferir o
 // servidor do pipe).
-func ServicePID() (uint32, error) {
+func ServicePID() (uint32, error) { return servicePIDNamed(ServiceName) }
+
+func servicePIDNamed(name string) (uint32, error) {
 	scm, err := windows.OpenSCManager(nil, nil, windows.SC_MANAGER_CONNECT)
 	if err != nil {
 		return 0, err
 	}
 	defer windows.CloseServiceHandle(scm)
-	name, _ := windows.UTF16PtrFromString(ServiceName)
-	h, err := windows.OpenService(scm, name, windows.SERVICE_QUERY_STATUS)
+	n, _ := windows.UTF16PtrFromString(name)
+	h, err := windows.OpenService(scm, n, windows.SERVICE_QUERY_STATUS)
 	if err != nil {
 		return 0, err
 	}
@@ -5838,7 +5949,7 @@ func ServicePID() (uint32, error) {
 		return 0, err
 	}
 	if st.CurrentState != windows.SERVICE_RUNNING || st.ProcessId == 0 {
-		return 0, fmt.Errorf("o serviço %s não está em execução", ServiceName)
+		return 0, fmt.Errorf("o serviço %s não está em execução", name)
 	}
 	return st.ProcessId, nil
 }
@@ -5868,7 +5979,9 @@ func ServicePID() (uint32, error) { return 0, platform.ErrNotSupported }
 func IsElevated() bool            { return os.Geteuid() == 0 }
 ```
 
-`internal/core/platform/svc/svc_windows_test.go`: Só no job `test-windows`: `ServicePID` de serviço não instalado dá erro. Install/Uninstall reais ficam para o e2e do Marco C.
+`internal/core/platform/svc/svc_windows_test.go`: Só no job `test-windows` (exige elevação; senão `t.Skip`): instala um serviço de teste `VPNMonitorTeste<pid>` sem dependência
+de RasMan, cujo executável é o próprio binário de teste (`-test.run=^TestWindowsServiceHelper$ <nome>`), inicia pelo SCM, confere
+`ServicePID` (diferente do PID do teste), desinstala e confere que o PID some. Também: `ServicePID` de serviço inexistente dá erro.
 
 ```go
 //go:build windows
@@ -5876,31 +5989,84 @@ func IsElevated() bool            { return os.Geteuid() == 0 }
 package svc
 
 import (
+	"context"
+	"flag"
+	"fmt"
+	"os"
 	"testing"
+	"time"
 
-	"golang.org/x/sys/windows"
+	"golang.org/x/sys/windows/svc"
 	"golang.org/x/sys/windows/svc/mgr"
 )
 
-// Só no job Windows: a consulta de PID com acesso mínimo funciona num
-// serviço que sempre roda (EventLog), e o nosso não instalado dá erro.
-func TestWindowsServicePIDQuery(t *testing.T) {
-	scm, err := windows.OpenSCManager(nil, nil, windows.SC_MANAGER_CONNECT)
+// Só no job Windows: consulta de PID com acesso mínimo para serviço inexistente.
+func TestWindowsServicePIDMissing(t *testing.T) {
+	if _, err := servicePIDNamed("VPNMonitorInexistente"); err == nil {
+		t.Fatal("serviço não instalado deveria dar erro")
+	}
+}
+
+// TestWindowsServiceHelper é o "serviço" do teste abaixo: o próprio binário de
+// teste, registrado no SCM com -test.run apontando para cá e o nome do
+// serviço como argumento posicional. Fora do SCM, não faz nada.
+func TestWindowsServiceHelper(t *testing.T) {
+	if ok, _ := svc.IsWindowsService(); !ok {
+		t.Skip("só roda quando iniciado pelo SCM")
+	}
+	name := flag.Arg(0)
+	_ = runNamed(name, Hooks{Run: func(ctx context.Context) error { <-ctx.Done(); return nil }})
+}
+
+// Só no job Windows (exige elevação): Install → start → ServicePID →
+// Uninstall com um nome de serviço de teste, sem RasMan como dependência.
+func TestWindowsInstallStartPIDUninstall(t *testing.T) {
+	if !IsElevated() {
+		t.Skip("exige processo elevado (o runner do CI é)")
+	}
+	exe, err := os.Executable()
 	if err != nil {
 		t.Fatal(err)
 	}
-	windows.CloseServiceHandle(scm)
+	name := fmt.Sprintf("VPNMonitorTeste%d", os.Getpid())
+	if err := installNamed(name, name, exe, nil, "-test.run=^TestWindowsServiceHelper$", name); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = uninstallNamed(name) })
+	if err := installNamed(name, name, exe, nil); err == nil {
+		t.Fatal("instalar de novo deveria dizer que já está instalado")
+	}
+
 	m, err := mgr.Connect()
 	if err != nil {
-		t.Skipf("sem acesso ao SCM: %v", err)
+		t.Fatal(err)
 	}
-	defer m.Disconnect()
-	if s, err := m.OpenService(ServiceName); err == nil {
-		s.Close()
-		t.Skip("VPNMonitor instalado nesta máquina")
+	s, err := m.OpenService(name)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if _, err := ServicePID(); err == nil {
-		t.Fatal("serviço não instalado deveria dar erro")
+	if err := s.Start(); err != nil {
+		t.Fatal(err)
+	}
+	s.Close()
+	m.Disconnect()
+
+	var pid uint32
+	deadline := time.Now().Add(20 * time.Second)
+	for time.Now().Before(deadline) {
+		if pid, err = servicePIDNamed(name); err == nil {
+			break
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	if pid == 0 || pid == uint32(os.Getpid()) {
+		t.Fatalf("PID do serviço de teste: %d (%v)", pid, err)
+	}
+	if err := uninstallNamed(name); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := servicePIDNamed(name); err == nil {
+		t.Fatal("após Uninstall o serviço não pode responder")
 	}
 }
 ```
@@ -6864,6 +7030,7 @@ git add internal/features/monitor/domain && git commit -m "feat(monitor): polít
 - Create: `internal/features/monitor/domain/commands.go`
 - Modify: `internal/features/monitor/domain/decide.go` (switch de `Decide`)
 - Test: `internal/features/monitor/domain/commands_test.go`
+- Test: `internal/features/monitor/domain/invariants_test.go`
 
 **Interfaces:**
 - Consumes: `domain.Decide`, `Decision`, `Input`, `resume` (função interna de decide.go), `isBlocked`, `(*Decision).set/start` (tarefa 13).
@@ -7038,6 +7205,91 @@ func TestDisabledIgnoresEverything(t *testing.T) {
 }
 ```
 
+`internal/features/monitor/domain/invariants_test.go`:
+
+```go
+package domain
+
+import (
+	"fmt"
+	"testing"
+	"time"
+)
+
+// Tabela estados × entradas: para cada estado de partida (com e sem
+// operação em andamento) e cada entrada possível (com variações), confere
+// invariantes que nenhum caminho pode quebrar.
+func TestInvariantsStatesByInputs(t *testing.T) {
+	states := []State{Desconhecido, Conectada, Degradada, Reconectando, Desconectada, CredencialInvalida, ErroConfig, Pausada, SemRede, Desativada}
+	ops := []Op{OpNone, OpProbeLink, OpProbeReach, OpDial}
+	inputs := []Input{
+		{Kind: InTick}, {Kind: InWake}, {Kind: InPowerResume},
+		{Kind: InLinkResult, Network: true, LinkUp: true}, {Kind: InLinkResult, Network: true}, {Kind: InLinkResult},
+		{Kind: InReachResult, ReachOK: true}, {Kind: InReachResult},
+		{Kind: InDialResult}, {Kind: InDialResult, DialErr: dialErr(809)}, {Kind: InDialResult, DialErr: dialErr(691)},
+		{Kind: InDialResult, DialErr: dialErr(623)}, {Kind: InDialResult, DialErr: dialErr(756)},
+		{Kind: InCheckNow}, {Kind: InReconnect, Fingerprint: "fp1"}, {Kind: InReconnect, Fingerprint: "fp2"},
+		{Kind: InPause}, {Kind: InPause, PauseUntil: t0.Add(time.Hour)},
+		{Kind: InResume, Fingerprint: "fp1"}, {Kind: InResume, Fingerprint: "fp2"},
+		{Kind: InCredentialChanged, Fingerprint: "fp1"}, {Kind: InCredentialChanged, Fingerprint: "fp2"},
+	}
+	p := params()
+	for _, from := range states {
+		for _, op := range ops {
+			for _, in := range inputs {
+				s := Status{State: from, Since: t0, Op: op, Attempt: 2, NextAttempt: t0.Add(time.Minute),
+					BlockedFP: "fp1", RejectedAt: t0, PausedUntil: t0.Add(2 * time.Hour)}
+				if isBlocked(from) {
+					s.Blocked = from
+				}
+				name := fmt.Sprintf("%s/op%d/in%d", from, op, in.Kind)
+				d := Decide(s, in, p, env(time.Second))
+				dials := d.Action == OpDial || d.Action == OpHangupDial
+
+				// Desativada nunca age.
+				if from == Desativada && (d.Action != OpNone || d.Next.State != Desativada) {
+					t.Errorf("%s: desativada agiu: %+v", name, d)
+				}
+				// Pausada só sai da pausa por resume ou pelo prazo; parada, não age.
+				if d.Next.State == Pausada && d.Action != OpNone {
+					t.Errorf("%s: pausada com ação %v", name, d.Action)
+				}
+				if from == Pausada && in.Kind != InResume && in.Kind != InTick && d.Next.State != Pausada {
+					t.Errorf("%s: saiu da pausa sem resume", name)
+				}
+				// Bloqueado nunca disca sem pedido manual.
+				if isBlocked(from) && dials && in.Kind != InReconnect {
+					t.Errorf("%s: bloqueado discou sozinho", name)
+				}
+				// Credencial rejeitada: reconexão manual com a mesma credencial
+				// dentro de 15 min nunca disca.
+				if from == CredencialInvalida && in.Kind == InReconnect && in.Fingerprint == "fp1" && dials {
+					t.Errorf("%s: repetiu credencial rejeitada", name)
+				}
+				// SemRede nunca gasta nem mexe no backoff.
+				if in.Kind == InLinkResult && !in.Network &&
+					(d.Next.Attempt != s.Attempt || !d.Next.NextAttempt.Equal(s.NextAttempt)) {
+					t.Errorf("%s: sem rede alterou o backoff: %+v", name, d.Next)
+				}
+				// Nunca discar com outra discagem em andamento.
+				if op == OpDial && dials {
+					t.Errorf("%s: discagem dupla", name)
+				}
+				// Op em andamento coerente com a ação pedida.
+				if d.Action == OpHangupDial && d.Next.Op != OpDial || d.Action != OpNone && d.Action != OpHangupDial && d.Next.Op != d.Action {
+					t.Errorf("%s: Op %v não reflete a ação %v", name, d.Next.Op, d.Action)
+				}
+				// Comandos sempre respondem; entradas automáticas nunca.
+				isCmd := in.Kind >= InCheckNow && in.Kind <= InResume
+				if isCmd != (d.Reply != nil) {
+					t.Errorf("%s: resposta %v para comando=%v", name, d.Reply, isCmd)
+				}
+			}
+		}
+	}
+}
+```
+
 - [ ] **Step 2: Rodar e confirmar a falha**
 
 Run: `go test ./internal/features/monitor/domain/`  
@@ -7050,6 +7302,11 @@ responde `paused` sem mudar o estado; com discagem em curso, `already_reconnecti
 `CredencialInvalida`, só se a impressão digital mudou ou se passaram 15 min desde a última tentativa (manual ou a rejeição automática,
 o que for mais recente) — senão `credential_rejected` com "tente novamente em N min". `resume` volta ao bloqueio anterior se a causa não
 mudou. Comandos em `Desativada` respondem `disabled`.
+
+`invariants_test.go` cruza todos os estados × operações em andamento × entradas (com variações) e confere: `Desativada` nunca age;
+`Pausada` nunca age e só sai por `resume`/prazo; bloqueados nunca discam sem `reconnect`; credencial rejeitada não é repetida em 15 min;
+`SemRede` não mexe em `Attempt`/`NextAttempt`; nunca há discagem dupla; `Op` reflete a ação; comandos sempre respondem e entradas
+automáticas nunca.
 
 `internal/features/monitor/domain/commands.go`:
 
@@ -7261,6 +7518,20 @@ func TestPingChecker(t *testing.T) {
 	}
 }
 
+func TestPingCheckerAbandonsHungEcho(t *testing.T) {
+	p := fake.NewPinger()
+	p.SetHang(true) // IcmpSendEcho2 real ignora ctx
+	defer p.SetHang(false)
+	c := NewChecker(config.Check{Kind: config.CheckPing, Host: "10.0.0.1", TimeoutSeconds: 30}, p, nil)
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() { time.Sleep(20 * time.Millisecond); cancel() }()
+	start := time.Now()
+	r := c.Check(ctx)
+	if r.OK || r.Err == nil || time.Since(start) > time.Second {
+		t.Fatalf("cancelamento deve abandonar o eco preso: %+v em %s", r, time.Since(start))
+	}
+}
+
 func TestTCPChecker(t *testing.T) {
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -7387,7 +7658,8 @@ Expected: FAIL — `undefined: NewChecker`, `undefined: Dialer`…
 
 - [ ] **Step 3: Implementar**
 
-O discador acompanha a discagem assíncrona com `Status` a cada 250 ms; timeout ou cancelamento (pausa, parada) chamam
+O `pingChecker` roda o eco numa goroutine e abandona o resultado quando o `ctx` termina: o `IcmpSendEcho2` real é síncrono e ignora
+`ctx` (até 30 s), e sem isso uma pausa ou a parada do serviço ficariam presas nele. O discador acompanha a discagem assíncrona com `Status` a cada 250 ms; timeout ou cancelamento (pausa, parada) chamam
 `HangUp` antes de voltar. Falha da sonda de rotas não impede discar (presume rede). Nomes de entrada são comparados sem diferenciar
 maiúsculas, como o Windows faz.
 
@@ -7445,14 +7717,31 @@ type pingChecker struct {
 	timeout time.Duration
 }
 
+// Check não fica refém do IcmpSendEcho2, que é síncrono e ignora ctx
+// (até 30 s): o eco roda numa goroutine e, se ctx terminar antes (pausa,
+// parada do serviço), o resultado é abandonado. A goroutine termina sozinha
+// quando o eco esgota o próprio prazo.
 func (p pingChecker) Check(ctx context.Context) ReachResult {
 	ctx, cancel := context.WithTimeout(ctx, p.timeout+time.Second)
 	defer cancel()
-	r, err := p.pinger.Ping(ctx, p.host, p.timeout)
-	if err != nil {
-		return ReachResult{Err: err}
+	type result struct {
+		r   icmp.Result
+		err error
 	}
-	return ReachResult{OK: r.OK, RTT: r.RTT}
+	ch := make(chan result, 1)
+	go func() {
+		r, err := p.pinger.Ping(ctx, p.host, p.timeout)
+		ch <- result{r, err}
+	}()
+	select {
+	case res := <-ch:
+		if res.err != nil {
+			return ReachResult{Err: res.err}
+		}
+		return ReachResult{OK: res.r.OK, RTT: res.r.RTT}
+	case <-ctx.Done():
+		return ReachResult{Err: ctx.Err()}
+	}
 }
 
 type tcpChecker struct {
@@ -8320,7 +8609,8 @@ type stubWorld struct {
 	gate      chan struct{} // se não nil, Probe espera um valor
 	dials     []adapters.DialJob
 	outcomes  []adapters.DialOutcome
-	block     bool // Dial espera o ctx (cancelamento)
+	block     bool          // Dial espera o ctx (cancelamento)
+	hang      chan struct{} // Dial trava ignorando o ctx até fechar
 	cancelled int
 	panicOn   string
 }
@@ -8351,12 +8641,16 @@ func (w *stubWorld) Check(context.Context) adapters.ReachResult {
 func (w *stubWorld) Dial(ctx context.Context, job adapters.DialJob) adapters.DialOutcome {
 	w.mu.Lock()
 	w.dials = append(w.dials, job)
-	block := w.block
+	block, hang := w.block, w.hang
 	var out adapters.DialOutcome
 	if len(w.outcomes) > 0 {
 		out, w.outcomes = w.outcomes[0], w.outcomes[1:]
 	}
 	w.mu.Unlock()
+	if hang != nil {
+		<-hang
+		return adapters.DialOutcome{Cancelled: true}
+	}
 	if block {
 		<-ctx.Done()
 		w.mu.Lock()
@@ -8946,7 +9240,7 @@ git add internal/features/monitor/service && git commit -m "feat(monitor): super
 
 **Interfaces:**
 - Consumes: `config.DecodeStrict`, `config.RawVPN`, `config.FieldError`, `config.Config` (4).
-- Produces: `ipc.ProtocolVersion = 1`, `ipc.MaxMessage = 65536`, `ipc.MaxConns = 32`, `ipc.PipeName`, `ipc.PipeSDDL`; constantes `ipc.Type*` (pedidos, `ok`, `error`, eventos) e `ipc.Code*`;
+- Produces: `ipc.ProtocolVersion = 1`, `ipc.MaxMessage = 65536`, `ipc.MaxConns = 32`, `ipc.PipeName`, `ipc.PipeSDDL`, `ipc.PipeIUMask = 0x0012019b`, `ipc.FileCreatePipeInstance = 0x4`; constantes `ipc.Type*` (pedidos, `ok`, `error`, eventos) e `ipc.Code*`;
   `ipc.Message{V int; ID, Type string; Payload json.RawMessage}`; `ipc.Error{Code, Message string; Fields []config.FieldError}` (implementa `error`);
   payloads `Hello`, `VPNRef`, `PauseRequest{VPN; UntilUnix *int64}`, `SetEnabledRequest`, `AddVPNRequest{Config config.RawVPN}`, `UpdateVPNRequest{Name; Config}`,
   `RemoveVPNRequest`, `SetGlobalRequest{Notifications *bool; LogLevel *string}`, `LogTailRequest{MaxBytes}`;
@@ -8990,6 +9284,19 @@ func TestCodecRoundTrip(t *testing.T) {
 	var null PauseRequest
 	if err := DecodePayload([]byte(`{"vpn":"x","untilUnix":null}`), &null); err != nil || null.UntilUnix != nil {
 		t.Fatal("null = indefinida")
+	}
+}
+
+func TestPipeSDDLDoesNotLetUsersCreateInstances(t *testing.T) {
+	if !strings.Contains(PipeSDDL, "(A;;0x0012019b;;;IU)") || strings.Contains(PipeSDDL, "GW;;;IU") {
+		t.Fatalf("ACE de IU inesperada: %s", PipeSDDL)
+	}
+	if PipeIUMask&FileCreatePipeInstance != 0 {
+		t.Fatal("IU não pode ter FILE_CREATE_PIPE_INSTANCE")
+	}
+	const fileReadData, fileWriteData = 0x1, 0x2
+	if PipeIUMask&fileReadData == 0 || PipeIUMask&fileWriteData == 0 {
+		t.Fatal("IU precisa ler e escrever")
 	}
 }
 
@@ -9058,6 +9365,9 @@ Expected: FAIL — `undefined: NewCodec`…
 Lacuna do spec preenchida: a §7 diz que "Abrir log" pede o fim do log **pelo pipe**, mas a §6.2 não lista o pedido; foi
 acrescentado `logTail{maxBytes}` → `{text}`. As respostas usam `type:"ok"`/`type:"error"` com o mesmo `id`.
 
+A ACE de Usuários Interativos usa a máscara explícita `0x0012019b` em vez de `GRGW`: em pipes, `FILE_APPEND_DATA` (parte de `GW`) é
+`FILE_CREATE_PIPE_INSTANCE`, e um usuário comum poderia abrir uma instância falsa do pipe.
+
 `internal/core/ipc/protocol.go`:
 
 ```go
@@ -9079,8 +9389,15 @@ const (
 	MaxConns        = 32
 	PipeName        = `\\.\pipe\vpnmon`
 	// PipeSDDL: Rede negada; SYSTEM e Administradores total; Usuários
-	// Interativos leitura e escrita. P = sem herança.
-	PipeSDDL = "D:P(D;;GA;;;NU)(A;;GA;;;SY)(A;;GA;;;BA)(A;;GRGW;;;IU)"
+	// Interativos leitura e escrita. P = sem herança. Para IU a máscara é
+	// explícita (0x0012019b = FILE_GENERIC_READ | FILE_WRITE_DATA |
+	// FILE_WRITE_EA | FILE_WRITE_ATTRIBUTES): "GW" incluiria
+	// FILE_APPEND_DATA, que em pipes é FILE_CREATE_PIPE_INSTANCE e deixaria
+	// um usuário abrir uma instância falsa do pipe.
+	PipeSDDL = "D:P(D;;GA;;;NU)(A;;GA;;;SY)(A;;GA;;;BA)(A;;0x0012019b;;;IU)"
+	// PipeIUMask é a máscara de IU acima; FileCreatePipeInstance não pode estar nela.
+	PipeIUMask             = 0x0012019b
+	FileCreatePipeInstance = 0x0004
 )
 
 // Tipos de mensagem.
@@ -9384,7 +9701,7 @@ git add internal/core/ipc && git commit -m "feat(ipc): protocolo v1 com codec po
 - Produces: Interface `ipc.Backend`: `Status() Snapshot`, `CheckNow(vpn) error`, `Reconnect(vpn) error`, `Pause(vpn, until *time.Time) error`, `Resume(vpn) error`,
   `SetEnabled(vpn, bool) error`, `AddVPN(config.RawVPN) error`, `UpdateVPN(name, config.RawVPN) error`, `RemoveVPN(name) error`, `ListRasEntries() ([]RasEntry, error)`,
   `GetConfig() config.Config`, `SetGlobal(SetGlobalRequest) error`, `LogTail(maxBytes int) (string, error)`, `Subscribe() (<-chan Message, func())`;
-  `ipc.Server{Backend; AppVersion; Log; MaxConns; HandshakeTimeout; WriteTimeout; OutQueue}` com `Serve(ctx, net.Listener) error`;
+  `ipc.Server{Backend; AppVersion; Log; MaxConns; HandshakeTimeout; WriteTimeout; IdleTimeout; OutQueue}` com `Serve(ctx, net.Listener) error`;
   `ipc.Handshake(net.Conn, appVersion) (*Client, error)`, `(*Client).Call(typ, payload, out) error` (erro do serviço vem como `*ipc.Error`), `Close()`, campo `ServerApp`;
   `ipc.Listen() (net.Listener, error)`, `ipc.Dial(ctx) (net.Conn, error)` (stubs fora do Windows).
 
@@ -9644,6 +9961,23 @@ func TestServerStopsOnContextCancel(t *testing.T) {
 		t.Fatal("conexões devem ser fechadas na parada")
 	}
 }
+
+func TestServerIdleTimeoutSparesSubscribers(t *testing.T) {
+	b := &fakeBackend{events: make(chan Message, 10)}
+	addr, _, _ := startServer(t, b, func(s *Server) { s.IdleTimeout = 100 * time.Millisecond })
+	idle := dial(t, addr)
+	sub := dial(t, addr)
+	if err := sub.Call(TypeSubscribe, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(300 * time.Millisecond)
+	if err := idle.Call(TypeStatus, nil, nil); err == nil {
+		t.Fatal("conexão ociosa sem inscrição deveria ter sido fechada")
+	}
+	if err := sub.Call(TypeStatus, nil, nil); err != nil {
+		t.Fatalf("conexão inscrita deve sobreviver à ociosidade: %v", err)
+	}
+}
 ```
 
 - [ ] **Step 2: Rodar e confirmar a falha**
@@ -9655,7 +9989,8 @@ Expected: FAIL — `undefined: Server`, `undefined: Handshake`…
 
 Servidor: handshake `hello` em até 5 s (protocolo diferente → `incompatible` e fecha); cada conexão sob `recover`; um escritor
 por conexão com fila de 64 mensagens — fila cheia (cliente que não consome) desconecta; linha acima de 64 KB ou JSON inválido →
-`bad_request` e fecha (o fluxo perdeu o sincronismo); 33ª conexão → `busy`. Os testes rodam no Linux sobre TCP local.
+`bad_request` e fecha (o fluxo perdeu o sincronismo); 33ª conexão → `busy`; conexão sem pedido por `IdleTimeout` (2 min) é fechada,
+exceto as inscritas em eventos (a bandeja fica ociosa por horas). Os testes rodam no Linux sobre TCP local.
 
 `internal/core/ipc/server.go`:
 
@@ -9704,7 +10039,10 @@ type Server struct {
 	MaxConns         int
 	HandshakeTimeout time.Duration
 	WriteTimeout     time.Duration
-	OutQueue         int
+	// IdleTimeout fecha conexões sem pedido nesse prazo, exceto as inscritas
+	// em eventos (a bandeja fica ociosa por horas). Padrão 2 min.
+	IdleTimeout time.Duration
+	OutQueue    int
 }
 
 func (s *Server) defaults() {
@@ -9719,6 +10057,9 @@ func (s *Server) defaults() {
 	}
 	if s.OutQueue == 0 {
 		s.OutQueue = 64
+	}
+	if s.IdleTimeout == 0 {
+		s.IdleTimeout = 2 * time.Minute
 	}
 	if s.Log == nil {
 		s.Log = slog.New(slog.DiscardHandler)
@@ -9843,7 +10184,6 @@ func (s *Server) handle(ctx context.Context, c net.Conn) {
 		return
 	}
 	cn.send(MustMessage(m.ID, TypeHello, Hello{Protocol: ProtocolVersion, AppVersion: s.AppVersion}))
-	_ = c.SetReadDeadline(time.Time{})
 
 	var unsubscribe func()
 	defer func() {
@@ -9852,6 +10192,11 @@ func (s *Server) handle(ctx context.Context, c net.Conn) {
 		}
 	}()
 	for {
+		if unsubscribe == nil {
+			_ = c.SetReadDeadline(time.Now().Add(s.IdleTimeout))
+		} else {
+			_ = c.SetReadDeadline(time.Time{}) // inscrito: pode ficar ocioso
+		}
 		m, err := cn.codec.Read()
 		if err != nil {
 			// Linha grande demais ou inválida: responde e encerra, porque o
@@ -10171,9 +10516,10 @@ func Listen() (net.Listener, error) { return nil, platform.ErrNotSupported }
 func Dial(context.Context) (net.Conn, error) { return nil, platform.ErrNotSupported }
 ```
 
-`internal/core/ipc/pipe_windows_test.go`: Só no job `test-windows`: pipe real com a SDDL do spec (confere a negação para `NU` e o acesso de `IU`) e a conferência
-de PID (PID do próprio processo passa, outro é recusado). Um cliente realmente sem permissão (outra conta/rede) não é reproduzível no
-runner; fica no roteiro manual (`docs/TESTE-MANUAL.md`, Marco C).
+`internal/core/ipc/pipe_windows_test.go`: Só no job `test-windows`: (1) DACL efetiva do pipe real — `NU` negado e a ACE de `IU` **sem** `FILE_CREATE_PIPE_INSTANCE`;
+(2) conferência de PID (o próprio passa, outro é recusado); (3) cliente sem permissão: token restrito (`CreateRestrictedToken` com
+Administradores, Interativos e SYSTEM como "somente negação"), personificado numa thread travada, recebe `ERROR_ACCESS_DENIED`.
+Sem privilégio para criar ou personificar o token, o teste faz `t.Skip` com o motivo.
 
 ```go
 //go:build windows
@@ -10182,45 +10528,82 @@ package ipc
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
+	"unsafe"
 
 	"github.com/Microsoft/go-winio"
 	"golang.org/x/sys/windows"
 )
 
-// Só no job Windows: pipe real com a ACL do spec e conferência de PID.
-func TestWindowsPipeACLAndPIDCheck(t *testing.T) {
-	name := fmt.Sprintf(`\\.\pipe\vpnmon-teste-%d`, os.Getpid())
+func listenTestPipe(t *testing.T) string {
+	t.Helper()
+	name := fmt.Sprintf(`\\.\pipe\vpnmon-teste-%d-%d`, os.Getpid(), time.Now().UnixNano())
 	ln, err := winio.ListenPipe(name, &winio.PipeConfig{SecurityDescriptor: PipeSDDL})
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer ln.Close()
+	t.Cleanup(func() { ln.Close() })
 	go func() {
 		for {
 			c, err := ln.Accept()
 			if err != nil {
 				return
 			}
-			defer c.Close()
+			c.Close()
 		}
 	}()
+	return name
+}
 
-	// O Windows pode reescrever direitos genéricos (GA→FA); conferimos as
-	// partes estáveis: negação para Rede e acesso para Usuários Interativos.
+// Só no job Windows: a DACL efetiva do pipe nega Rede e dá a Usuários
+// Interativos leitura e escrita SEM FILE_CREATE_PIPE_INSTANCE.
+func TestWindowsPipeDACL(t *testing.T) {
+	name := listenTestPipe(t)
 	sd, err := windows.GetNamedSecurityInfo(name, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION)
 	if err != nil {
 		t.Fatal(err)
 	}
 	s := sd.String()
-	if !strings.Contains(s, "(D;;") || !strings.Contains(s, ";;;NU)") || !strings.Contains(s, ";;;IU)") {
-		t.Fatalf("ACL do pipe não segue a §6.1: %s", s)
+	if !strings.Contains(s, "(D;;") || !strings.Contains(s, ";;;NU)") {
+		t.Fatalf("Rede deveria ser negada: %s", s)
 	}
+	dacl, _, err := sd.DACL()
+	if err != nil {
+		t.Fatal(err)
+	}
+	iu, err := windows.CreateWellKnownSid(windows.WinInteractiveSid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for i := uint32(0); i < uint32(dacl.AceCount); i++ {
+		var ace *windows.ACCESS_ALLOWED_ACE
+		if err := windows.GetAce(dacl, i, &ace); err != nil {
+			t.Fatal(err)
+		}
+		sid := (*windows.SID)(unsafe.Pointer(&ace.SidStart))
+		if ace.Header.AceType != windows.ACCESS_ALLOWED_ACE_TYPE || !sid.Equals(iu) {
+			continue
+		}
+		found = true
+		if uint32(ace.Mask)&FileCreatePipeInstance != 0 {
+			t.Fatalf("IU pode criar instância do pipe: máscara %#x", ace.Mask)
+		}
+	}
+	if !found {
+		t.Fatalf("sem ACE para IU: %s", s)
+	}
+}
 
+// Só no job Windows: conferência de PID (o próprio PID passa, outro é recusado).
+func TestWindowsPipePIDCheck(t *testing.T) {
+	name := listenTestPipe(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	self := func() (uint32, error) { return uint32(os.Getpid()), nil }
@@ -10232,6 +10615,61 @@ func TestWindowsPipeACLAndPIDCheck(t *testing.T) {
 	other := func() (uint32, error) { return 4, nil }
 	if _, err := dialVerified(ctx, name, other); err == nil {
 		t.Fatal("PID diferente do serviço deve ser recusado")
+	}
+}
+
+var procCreateRestrictedToken = windows.NewLazySystemDLL("advapi32.dll").NewProc("CreateRestrictedToken")
+
+// Só no job Windows: um cliente sem nenhum dos grupos da ACL (Administradores
+// e Usuários Interativos viram "somente negação" num token restrito) é
+// recusado pelo pipe com ERROR_ACCESS_DENIED.
+func TestWindowsPipeRefusesClientWithoutPermission(t *testing.T) {
+	name := listenTestPipe(t)
+
+	var proc windows.Token
+	if err := windows.OpenProcessToken(windows.CurrentProcess(),
+		windows.TOKEN_DUPLICATE|windows.TOKEN_QUERY|windows.TOKEN_ASSIGN_PRIMARY|windows.TOKEN_IMPERSONATE, &proc); err != nil {
+		t.Skipf("sem acesso ao token do processo: %v", err)
+	}
+	defer proc.Close()
+	var disable []windows.SIDAndAttributes
+	for _, k := range []windows.WELL_KNOWN_SID_TYPE{windows.WinBuiltinAdministratorsSid, windows.WinInteractiveSid, windows.WinLocalSystemSid} {
+		sid, err := windows.CreateWellKnownSid(k)
+		if err != nil {
+			t.Fatal(err)
+		}
+		disable = append(disable, windows.SIDAndAttributes{Sid: sid})
+	}
+	const disableMaxPrivilege = 0x1
+	var restricted windows.Token
+	r, _, e := procCreateRestrictedToken.Call(uintptr(proc), disableMaxPrivilege,
+		uintptr(len(disable)), uintptr(unsafe.Pointer(&disable[0])), 0, 0, 0, 0, uintptr(unsafe.Pointer(&restricted)))
+	if r == 0 {
+		t.Skipf("CreateRestrictedToken indisponível: %v", e)
+	}
+	defer restricted.Close()
+	var imp windows.Token
+	if err := windows.DuplicateTokenEx(restricted, windows.MAXIMUM_ALLOWED, nil,
+		windows.SecurityImpersonation, windows.TokenImpersonation, &imp); err != nil {
+		t.Skipf("DuplicateTokenEx: %v", err)
+	}
+	defer imp.Close()
+
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
+	if err := windows.SetThreadToken(nil, imp); err != nil {
+		t.Skipf("sem privilégio para personificar: %v", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	c, err := winio.DialPipeContext(ctx, name)
+	_ = windows.RevertToSelf()
+	if err == nil {
+		c.Close()
+		t.Fatal("cliente sem permissão conectou no pipe")
+	}
+	if !errors.Is(err, windows.ERROR_ACCESS_DENIED) {
+		t.Fatalf("esperava acesso negado, veio %v", err)
 	}
 }
 ```
@@ -10276,7 +10714,7 @@ git add go.mod go.sum internal/core/ipc && git commit -m "feat(ipc): servidor co
 
 **Interfaces:**
 - Consumes: `Supervisor`, `Deps`, `Update`, `DialQueue`, interfaces `LinkProber`/`Dialer`/`Fingerprinter` (17–18); `ipc.*` (19); `config.*`; `logging.EventSink`, `logging.ForVPN`, `logging.RecordingSink`; `adapters.NewChecker`; `ras.Client`; `icmp.Pinger`; `shared.ResumeDetector`; `stubWorld` de `supervisor_test.go`.
-- Produces: `service.Paths{ConfigFile, StateFile, LogFile string}`; `service.Options{Paths; Clock; RAS; Pinger; TCPDial; Link; Dialer; Creds; Log; Events; Rand; OnGlobals func(config.Config); RestartDelay; CommandTimeout}`;
+- Produces: `service.Paths{ConfigFile, StateFile, LogFile string}`; `service.Options{Paths; Clock; RAS; Pinger; TCPDial; Link; Dialer; Creds; Log; Events; Rand; OnGlobals func(config.Config); RestartDelay; CommandTimeout; StopTimeout}`;
   `service.New(Options, config.Config, config.State) *Orchestrator` com `Start(ctx)`, `Stop()`, `Status() ipc.Snapshot`, `Subscribe()`, `Wake()`, `PowerResume()`,
   `CredentialsChanged()`, `CheckNow(name)`, `Reconnect(name)`, `Pause(name, *time.Time)`, `Resume(name)`; `service.ToView(config.VPN, domain.Status, now) ipc.VPNView`.
 
@@ -10289,6 +10727,7 @@ package service
 
 import (
 	"context"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -10311,6 +10750,7 @@ type orchHarness struct {
 	events *logging.RecordingSink
 	paths  Paths
 	ras    *fake.RAS
+	pinger *fake.Pinger
 	cancel context.CancelFunc
 }
 
@@ -10327,6 +10767,11 @@ func cfgWith(vpns ...config.VPN) config.Config {
 
 func newOrch(t *testing.T, w *stubWorld, cfg config.Config, st config.State) *orchHarness {
 	t.Helper()
+	return newOrchWith(t, w, cfg, st, nil)
+}
+
+func newOrchWith(t *testing.T, w *stubWorld, cfg config.Config, st config.State, tweak func(*Options)) *orchHarness {
+	t.Helper()
 	dir := t.TempDir()
 	h := &orchHarness{t: t, w: w, clk: shared.NewFakeClock(t0), events: &logging.RecordingSink{},
 		paths: Paths{ConfigFile: filepath.Join(dir, "config.json"), StateFile: filepath.Join(dir, "state.json"),
@@ -10335,12 +10780,16 @@ func newOrch(t *testing.T, w *stubWorld, cfg config.Config, st config.State) *or
 	if _, err := config.Save(h.paths.ConfigFile, cfg); err != nil {
 		t.Fatal(err)
 	}
-	pinger := fake.NewPinger()
-	pinger.SetReachable("10.0.0.1", true)
-	h.o = New(Options{
-		Paths: h.paths, Clock: h.clk, RAS: h.ras, Pinger: pinger, Link: w, Dialer: w, Creds: w,
+	h.pinger = fake.NewPinger()
+	h.pinger.SetReachable("10.0.0.1", true)
+	opts := Options{
+		Paths: h.paths, Clock: h.clk, RAS: h.ras, Pinger: h.pinger, Link: w, Dialer: w, Creds: w,
 		Events: h.events,
-	}, cfg, st)
+	}
+	if tweak != nil {
+		tweak(&opts)
+	}
+	h.o = New(opts, cfg, st)
 	ctx, cancel := context.WithCancel(context.Background())
 	h.cancel = cancel
 	h.o.Start(ctx)
@@ -10350,16 +10799,23 @@ func newOrch(t *testing.T, w *stubWorld, cfg config.Config, st config.State) *or
 
 func (h *orchHarness) waitView(name string, state domain.State) ipc.VPNView {
 	h.t.Helper()
+	return h.waitViewWhere(name, func(v ipc.VPNView) bool { return v.State == string(state) })
+}
+
+// waitViewWhere espera a VPN satisfazer cond (estado e campos juntos, para
+// não pegar um retrato intermediário).
+func (h *orchHarness) waitViewWhere(name string, cond func(ipc.VPNView) bool) ipc.VPNView {
+	h.t.Helper()
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
 		for _, v := range h.o.Status().VPNs {
-			if v.Name == name && v.State == string(state) {
+			if v.Name == name && cond(v) {
 				return v
 			}
 		}
 		time.Sleep(2 * time.Millisecond)
 	}
-	h.t.Fatalf("%s não chegou a %s: %+v", name, state, h.o.Status())
+	h.t.Fatalf("%s não chegou à condição esperada: %+v", name, h.o.Status())
 	return ipc.VPNView{}
 }
 
@@ -10463,6 +10919,12 @@ func TestOrchestratorSubscribeAndStopping(t *testing.T) {
 		t.Fatalf("primeiro evento %s", first.Type)
 	}
 	h.waitView("Matriz", domain.Conectada)
+	// A VPN pode ter conectado antes da inscrição (aí já veio no snapshot);
+	// uma verificação garante um vpnState depois dela.
+	if err := h.o.CheckNow("Matriz"); err != nil {
+		t.Fatal(err)
+	}
+	h.waitView("Matriz", domain.Conectada)
 	h.o.Stop()
 	sawState, sawStopping := false, false
 	for m := range drain(events) {
@@ -10477,8 +10939,8 @@ func TestOrchestratorSubscribeAndStopping(t *testing.T) {
 func TestOrchestratorClockJumpResetsBackoff(t *testing.T) {
 	w := &stubWorld{network: true, outcomes: []adapters.DialOutcome{{Err: &domain.DialError{Code: 809}}}}
 	h := newOrch(t, w, cfgWith(vpnNamed("Matriz")), config.State{})
-	v := h.waitView("Matriz", domain.Reconectando)
-	if v.NextAttemptUnix != t0.Add(30*time.Second).Unix() {
+	v := h.waitViewWhere("Matriz", func(v ipc.VPNView) bool { return v.NextAttemptUnix != 0 })
+	if v.State != string(domain.Reconectando) || v.NextAttemptUnix != t0.Add(30*time.Second).Unix() {
 		t.Fatalf("primeiro backoff: %+v", v)
 	}
 	h.clk.Suspend(2 * time.Hour)   // máquina dormiu
@@ -10511,6 +10973,61 @@ func drain(ch <-chan ipc.Message) <-chan ipc.Message {
 	}()
 	return out
 }
+
+func TestStopWithHungEchoIsFast(t *testing.T) {
+	w := &stubWorld{up: true, network: true}
+	h := newOrch(t, w, cfgWith(vpnNamed("Matriz")), config.State{})
+	h.pinger.SetHang(true) // IcmpSendEcho2 preso, ignorando ctx
+	defer h.pinger.SetHang(false)
+	deadline := time.Now().Add(2 * time.Second)
+	for h.pinger.Calls() == 0 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	start := time.Now()
+	h.o.Stop()
+	if d := time.Since(start); d > 2*time.Second {
+		t.Fatalf("parada com eco preso levou %s", d)
+	}
+	if _, err := os.Stat(h.paths.StateFile); err != nil {
+		t.Fatal("state.json deveria ser gravado")
+	}
+}
+
+func TestStopDeadlineWithHungSupervisor(t *testing.T) {
+	hang := make(chan struct{})
+	defer close(hang)
+	w := &stubWorld{network: true, hang: hang} // discador preso ignorando ctx
+	h := newOrchWith(t, w, cfgWith(vpnNamed("Matriz")), config.State{}, func(o *Options) { o.StopTimeout = 200 * time.Millisecond })
+	deadline := time.Now().Add(2 * time.Second)
+	for len(w.get().dials) == 0 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	start := time.Now()
+	h.o.Stop()
+	if d := time.Since(start); d > time.Second {
+		t.Fatalf("Stop deve respeitar o prazo global, levou %s", d)
+	}
+	if _, err := os.Stat(h.paths.StateFile); err != nil {
+		t.Fatal("state.json deveria ser gravado mesmo com supervisor preso")
+	}
+}
+
+func TestRemovedVPNPauseLeavesStateFile(t *testing.T) {
+	w := &stubWorld{up: true, network: true}
+	h := newOrch(t, w, cfgWith(vpnNamed("Matriz"), vpnNamed("Filial")), config.State{})
+	h.waitView("Filial", domain.Conectada)
+	if err := h.o.Pause("Filial", nil); err != nil {
+		t.Fatal(err)
+	}
+	h.waitView("Filial", domain.Pausada)
+	h.o.applyMu.Lock()
+	h.o.apply(cfgWith(vpnNamed("Matriz")))
+	h.o.applyMu.Unlock()
+	st, err := config.LoadState(h.paths.StateFile, t0)
+	if err != nil || len(st.Pauses) != 0 {
+		t.Fatalf("pausa da VPN removida continua em state.json: %+v %v", st, err)
+	}
+}
 ```
 
 `internal/features/monitor/service/helpers_test.go`:
@@ -10534,8 +11051,9 @@ Expected: FAIL — `undefined: New`, `undefined: Options`…
 
 - [ ] **Step 3: Implementar**
 
-`apply` reinicia só as VPNs cujo trecho mudou (`config.VPN` é comparável); `Stop` encerra supervisores, publica
-`serviceStopping` e grava `state.json`, sem desligar VPNs conectadas. Panic de supervisor → log + Event Log e recriação após 5 s
+`apply` reinicia só as VPNs cujo trecho mudou (`config.VPN` é comparável) e, ao remover uma VPN pausada, regrava `state.json` sem a
+pausa dela; `Stop` encerra supervisores com **prazo global** (`StopTimeout`, 7 s em tempo real — quem não voltar é abandonado e
+registrado), publica `serviceStopping` e grava `state.json` mesmo assim, sem desligar VPNs conectadas (o SCM espera 10 s). Panic de supervisor → log + Event Log e recriação após 5 s
 (dobrando até 60 s; zera se rodou mais de 1 min). Atualizações de supervisores antigos são ignoradas. O detector de salto de relógio
 (tique de 5 s, limite 2× o menor intervalo) chama `PowerResume`. Assinantes recebem o snapshot primeiro, registrados sob o mesmo lock que
 publica, para não perder evento.
@@ -10689,6 +11207,9 @@ type Options struct {
 	RestartDelay time.Duration
 	// CommandTimeout limita a espera por um supervisor. Padrão 5 s.
 	CommandTimeout time.Duration
+	// StopTimeout é o prazo para os supervisores pararem em Stop (e numa
+	// recarga). Padrão 7 s, deixando folga nos 10 s que o SCM espera.
+	StopTimeout time.Duration
 }
 
 type running struct {
@@ -10713,6 +11234,10 @@ type Orchestrator struct {
 	state       config.State
 	sups        map[string]*running
 	lastWritten string // hash do último config.json gravado pelo serviço
+	// diskInvalid é o problema do config.json em disco, enquanto ele estiver
+	// inválido; nesse estado as mudanças pelo pipe são recusadas para não
+	// sobrescrever a edição manual (ou o arquivo inteiro, se inválido desde a partida).
+	diskInvalid error
 }
 
 // New cria o orquestrador com a config e o estado iniciais.
@@ -10728,6 +11253,9 @@ func New(opts Options, cfg config.Config, st config.State) *Orchestrator {
 	}
 	if opts.CommandTimeout == 0 {
 		opts.CommandTimeout = 5 * time.Second
+	}
+	if opts.StopTimeout == 0 {
+		opts.StopTimeout = 7 * time.Second
 	}
 	if opts.OnGlobals == nil {
 		opts.OnGlobals = func(config.Config) {}
@@ -10762,7 +11290,7 @@ func (o *Orchestrator) Stop() {
 		delete(o.sups, k)
 	}
 	o.mu.Unlock()
-	stopAll(all)
+	o.stopAll(all)
 	o.bus.publish(ipc.MustMessage("", ipc.TypeServiceStopping, struct{}{}))
 	o.mu.Lock()
 	st := o.state
@@ -10772,12 +11300,22 @@ func (o *Orchestrator) Stop() {
 	}
 }
 
-func stopAll(rs []*running) {
+// stopAll cancela os supervisores e espera no máximo StopTimeout. Quem não
+// voltar no prazo é abandonado (registrado no log): o estado é gravado mesmo
+// assim e atualizações tardias são ignoradas por onUpdate.
+func (o *Orchestrator) stopAll(rs []*running) {
 	for _, r := range rs {
 		r.cancel()
 	}
+	// Prazo em tempo real (não o Clock injetável): é o SCM que está esperando.
+	t := time.NewTimer(o.opts.StopTimeout)
+	defer t.Stop()
 	for _, r := range rs {
-		<-r.done
+		select {
+		case <-r.done:
+		case <-t.C:
+			o.opts.Log.Warn("supervisor não parou no prazo; seguindo sem ele", "vpn", r.vpn.Name)
+		}
 	}
 }
 
@@ -10801,16 +11339,27 @@ func (o *Orchestrator) apply(cfg config.Config) {
 		}
 		start = append(start, v)
 	}
+	pausesChanged := false
 	for key, r := range o.sups {
 		if !keep[key] {
 			stop = append(stop, r)
 			delete(o.sups, key)
+		}
+	}
+	for key := range o.state.Pauses {
+		if !keep[key] {
 			delete(o.state.Pauses, key)
+			pausesChanged = true
+		}
+	}
+	if pausesChanged {
+		if err := config.SaveState(o.opts.Paths.StateFile, o.state); err != nil {
+			o.opts.Log.Error("gravando state.json", "erro", err)
 		}
 	}
 	o.mu.Unlock()
 
-	stopAll(stop)
+	o.stopAll(stop)
 
 	o.mu.Lock()
 	for _, v := range start {
@@ -11087,7 +11636,7 @@ git add internal/features/monitor/service && git commit -m "feat(monitor): orque
 **Interfaces:**
 - Consumes: `Orchestrator`, `apply`, `bus`, `o.mu`/`o.applyMu` (21); `config.Save`, `Validate`, `ValidateVPN`, `Parse`, `NameKey`; `logging.Tail`; `ipc.Backend`.
 - Produces: `(*Orchestrator).SetEnabled`, `AddVPN`, `UpdateVPN` (nome imutável), `RemoveVPN`, `SetGlobal`, `GetConfig`, `ListRasEntries`, `LogTail`, `ReloadFromDisk()`, `MarkWritten([]byte)`;
-  `var _ ipc.Backend = (*Orchestrator)(nil)` — o orquestrador passa a ser o backend do pipe.
+  `(*Orchestrator).MarkDiskInvalid(error)`; `var _ ipc.Backend = (*Orchestrator)(nil)` — o orquestrador passa a ser o backend do pipe.
 
 - [ ] **Step 1: Escrever o teste que falha**
 
@@ -11217,6 +11766,17 @@ func TestReloadFromDisk(t *testing.T) {
 		t.Fatalf("Event Log: %+v", ev)
 	}
 
+	// Enquanto o arquivo em disco estiver inválido, mudanças pelo pipe são
+	// recusadas: gravar agora apagaria a edição manual.
+	var e *ipc.Error
+	err := h.o.AddVPN(config.RawVPN{Name: "Nova", RasEntry: "x", Check: &config.RawCheck{Kind: config.CheckLink}})
+	if !asIPC(err, &e) || e.Code != ipc.CodeInvalidConfig || !strings.Contains(e.Message, "corrija o arquivo") {
+		t.Fatalf("mudança com arquivo inválido: %v", err)
+	}
+	if b, _ := os.ReadFile(h.paths.ConfigFile); !strings.Contains(string(b), `"kind":"ping"}}]}`) {
+		t.Fatalf("arquivo inválido foi sobrescrito: %s", b)
+	}
+
 	// Arquivo momentaneamente vazio (editor gravando em dois passos): mantém.
 	_ = os.WriteFile(h.paths.ConfigFile, nil, 0o600)
 	h.o.ReloadFromDisk()
@@ -11230,6 +11790,9 @@ func TestReloadFromDisk(t *testing.T) {
 	_ = os.WriteFile(h.paths.ConfigFile, data, 0o600)
 	h.o.ReloadFromDisk()
 	h.waitView("Filial", domain.Conectada)
+	if err := h.o.SetEnabled("Filial", true); err != nil {
+		t.Fatalf("após recarga válida as mudanças voltam a valer: %v", err)
+	}
 }
 
 func TestListRasEntriesMarksMonitored(t *testing.T) {
@@ -11252,6 +11815,8 @@ Expected: FAIL — `h.o.AddVPN undefined`…
 Toda mudança valida a config inteira antes de gravar (inválida nunca é gravada) e devolve `invalid_config` com `Fields`
 relativos à VPN para a interface mostrar junto ao campo. A recarga ignora a própria gravação comparando o hash; arquivo inválido **ou
 vazio** (editor gravando em dois passos — item 3 do Review Focus) mantém a config anterior, registra no log e no Event Log e publica `configStatus`.
+Enquanto o arquivo em disco estiver inválido (na recarga, ou desde a partida via `MarkDiskInvalid`), toda mudança pelo pipe é recusada
+com `invalid_config` e o motivo — gravar apagaria a edição manual.
 
 `internal/features/monitor/service/configops.go`:
 
@@ -11293,6 +11858,11 @@ func (o *Orchestrator) mutate(f func(c *config.Config) error) error {
 	o.applyMu.Lock()
 	defer o.applyMu.Unlock()
 	o.mu.Lock()
+	if bad := o.diskInvalid; bad != nil {
+		o.mu.Unlock()
+		return &ipc.Error{Code: ipc.CodeInvalidConfig,
+			Message: "config.json em disco está inválido; corrija o arquivo antes de alterar pela bandeja ou CLI: " + bad.Error()}
+	}
 	c := o.cfg
 	c.VPNs = slices.Clone(o.cfg.VPNs)
 	o.mu.Unlock()
@@ -11453,6 +12023,7 @@ func (o *Orchestrator) ReloadFromDisk() {
 	}
 	c, err := config.Parse(data)
 	if err != nil {
+		o.MarkDiskInvalid(err)
 		msg := "config.json inválido; mantendo a config anterior: " + err.Error()
 		o.opts.Log.Error(msg)
 		o.opts.Events.Warning(msg)
@@ -11468,6 +12039,7 @@ func (o *Orchestrator) ReloadFromDisk() {
 	defer o.applyMu.Unlock()
 	o.mu.Lock()
 	o.lastWritten = h
+	o.diskInvalid = nil
 	o.mu.Unlock()
 	o.opts.Log.Info("config.json recarregado")
 	o.opts.OnGlobals(c)
@@ -11481,6 +12053,15 @@ func (o *Orchestrator) MarkWritten(data []byte) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	o.lastWritten = hashBytes(data)
+}
+
+// MarkDiskInvalid registra que o config.json em disco está inválido (na
+// partida, pela montagem; depois, pela recarga). Mudanças pelo pipe ficam
+// recusadas até uma recarga válida.
+func (o *Orchestrator) MarkDiskInvalid(err error) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.diskInvalid = err
 }
 ```
 
@@ -12202,6 +12783,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"net"
 	"os"
 	"path/filepath"
@@ -12351,6 +12933,40 @@ func TestServeSurvivesInvalidConfig(t *testing.T) {
 	if ev := ts.events.Snapshot(); len(ev) == 0 || ev[0].Level != "error" {
 		t.Fatalf("Event Log: %+v", ev)
 	}
+	err := ts.o.AddVPN(config.RawVPN{Name: "Nova", RasEntry: "VPN Filial", Check: &config.RawCheck{Kind: config.CheckLink}})
+	if err == nil || !strings.Contains(err.Error(), "corrija o arquivo") {
+		t.Fatalf("vpn add com config.json inválido deve ser recusado: %v", err)
+	}
+	if b, _ := os.ReadFile(filepath.Join(te.dir, "config.json")); string(b) != `{"version":9}` {
+		t.Fatal("arquivo inválido não pode ser sobrescrito por vpn add")
+	}
+}
+
+func TestServeExitsCleanlyWhenPipeIsTaken(t *testing.T) {
+	te := newTestEnv(t)
+	rasFake := fake.NewRAS("VPN Matriz")
+	_ = os.WriteFile(filepath.Join(te.dir, "state.json"), []byte(`{"pauses":{"matriz":{"indefinite":true}}}`), 0o600)
+	p := Platform{
+		RAS: rasFake, Pinger: fake.NewPinger(), Net: fake.NewNet(), DPAPI: fake.DPAPI{}, ACL: &fake.ACL{},
+		Listen: func() (net.Listener, error) { return nil, errors.New("Access is denied") },
+		Events: &logging.RecordingSink{},
+		ReadSeed: func() (config.Seed, bool, error) {
+			return config.Seed{VPNEntry: "VPN Matriz", CheckHost: "10.0.0.1"}, true, nil
+		},
+	}
+	err := serve(context.Background(), p, newLayout(te.dir), shared.RealClock{}, nil)
+	if err == nil || !strings.Contains(err.Error(), "outro VPN Monitor") {
+		t.Fatalf("serve deve falhar cedo: %v", err)
+	}
+	if len(rasFake.Calls()) != 0 {
+		t.Fatalf("segunda instância não pode discar: %v", rasFake.Calls())
+	}
+	if b, _ := os.ReadFile(filepath.Join(te.dir, "state.json")); string(b) != `{"pauses":{"matriz":{"indefinite":true}}}` {
+		t.Fatalf("segunda instância não pode regravar state.json: %s", b)
+	}
+	if _, err := os.Stat(filepath.Join(te.dir, "config.json")); err == nil {
+		t.Fatal("segunda instância não pode criar config.json")
+	}
 }
 
 func TestNoArgsAsServiceRunsService(t *testing.T) {
@@ -12371,8 +12987,11 @@ Expected: FAIL — `undefined: serve`, `undefined: serviceMain`…
 
 - [ ] **Step 3: Implementar**
 
-Sequência de subida: ACL da pasta → log → config (seed no primeiro início; inválida → sobe sem VPNs e não sobrescreve) →
-`state.json` → cofre → orquestrador → observadores (config 250 ms/1 s, cofre 1 s/1 s, desconexão RAS, rede com espera de 2 s) → pipe.
+Sequência de subida: ACL da pasta → log → **pipe** (é a trava de instância única: o go-winio cria a primeira instância com
+`FILE_FLAG_FIRST_PIPE_INSTANCE`; se outro `vpnmon-svc` já roda, sai aqui sem discar nem tocar em `config.json`/`state.json`) →
+config (seed no primeiro início; inválida → sobe sem VPNs, marca `MarkDiskInvalid` e não sobrescreve) → `state.json` → cofre →
+orquestrador → observadores (config 250 ms/1 s, cofre 1 s/1 s, desconexão RAS, rede com espera de 2 s) → servidor do pipe.
+`OnResume` chama `go o.PowerResume()`: o laço do SCM não pode esperar os supervisores.
 Parada: observadores → `o.Stop()` (supervisores, `serviceStopping`, `state.json`) → fecha o pipe; prazo ≤ 10 s, sem derrubar VPNs.
 O teste de integração roda o serviço inteiro no Linux com a plataforma falsa e o pipe trocado por TCP.
 
@@ -12462,6 +13081,19 @@ func serve(ctx context.Context, p Platform, l layout, clock shared.Clock, ready 
 		lw.SetLimits(int64(c.Log.MaxSizeMB)<<20, c.Log.MaxFiles)
 	}
 
+	// O pipe é aberto antes de qualquer outra coisa: o go-winio cria a
+	// primeira instância com FILE_FLAG_FIRST_PIPE_INSTANCE, então ele também é
+	// a trava de instância única. Se outro vpnmon-svc já roda, saímos aqui sem
+	// discar nem tocar em config.json/state.json.
+	ln, err := p.Listen()
+	if err != nil {
+		msg := "abrindo o pipe " + ipc.PipeName + " (outro VPN Monitor em execução?): " + err.Error()
+		log.Error(msg)
+		p.Events.Error(msg)
+		return errors.New(msg)
+	}
+	defer ln.Close()
+
 	cfg, boot, cfgErr := config.LoadOrCreate(l.ConfigFile, p.ReadSeed)
 	if cfgErr != nil {
 		// Degrada em vez de cair: sobe sem VPNs e espera o arquivo ser corrigido.
@@ -12497,6 +13129,8 @@ func serve(ctx context.Context, p Platform, l layout, clock shared.Clock, ready 
 		if data, err := os.ReadFile(l.ConfigFile); err == nil {
 			o.MarkWritten(data)
 		}
+	} else {
+		o.MarkDiskInvalid(cfgErr) // não deixa "vpn add" sobrescrever o arquivo
 	}
 	octx, ocancel := context.WithCancel(context.Background())
 	defer ocancel()
@@ -12530,14 +13164,6 @@ func serve(ctx context.Context, p Platform, l layout, clock shared.Clock, ready 
 		}
 	}()
 
-	ln, err := p.Listen()
-	if err != nil {
-		o.Stop()
-		msg := "abrindo o pipe " + ipc.PipeName + ": " + err.Error()
-		log.Error(msg)
-		p.Events.Error(msg)
-		return errors.New(msg)
-	}
 	srv := &ipc.Server{Backend: o, AppVersion: version, Log: log}
 	sctx, scancel := context.WithCancel(context.Background())
 	srvDone := make(chan error, 1)
@@ -12576,9 +13202,11 @@ func serviceMain(e env) int {
 			}
 			return serve(ctx, p, l, shared.RealClock{}, orch.Store)
 		},
+		// Fora do laço do SCM: PowerResume fala com cada supervisor e não pode
+		// atrasar a resposta a stop/preshutdown.
 		OnResume: func() {
 			if o := orch.Load(); o != nil {
-				o.PowerResume()
+				go o.PowerResume()
 			}
 		},
 	})
@@ -13099,6 +13727,7 @@ git add cmd/vpnmon-svc && git commit -m "feat(cli): status, vpn add/remove/list 
 | §4.2 estados | Task 12 |
 | §4.3 ciclo (enlace, alcance, zumbi, carência, `SemRede`) | Tasks 10, 13, 15 |
 | §4.4 discagem assíncrona, callback único, fila global, catálogo, credencial salva, pshpack4, adoção | Tasks 7, 8, 15, 17, 18 (`TestAdoptsExistingConnectionWithoutDialing`) |
+| §8 parada ≤ 10 s mesmo com verificação presa | Tasks 15 (`TestPingCheckerAbandonsHungEcho`), 21 (`TestStopWithHungEchoIsFast`, `TestStopDeadlineWithHungSupervisor`) |
 | §4.5 classificação de erros | Task 7 (tabela), 13 (comportamento) |
 | §4.6 despertares (timer, RAS, rede com 2 s, energia/salto) | Tasks 1, 8, 10, 11, 18, 21, 24 |
 | §4.7 pausa e comandos manuais | Task 14, 18, 21 |

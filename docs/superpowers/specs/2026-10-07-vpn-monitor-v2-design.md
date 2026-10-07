@@ -222,8 +222,10 @@ Despertares se agregam: vários pendentes geram um só ciclo.
 - `reconnect` em `ErroConfig` faz uma tentativa.
 - `reconnect` em `CredencialInvalida` faz uma tentativa **só se** a credencial
   mudou desde a rejeição (impressão digital do arquivo do cofre ou do marcador
-  do Windows) **ou** se passaram 15 min desde a última tentativa manual com a
-  mesma credencial. Caso contrário responde "credencial já rejeitada; tente
+  do Windows) **ou** se passaram 15 min desde a última tentativa com a mesma
+  credencial — a mais recente entre a tentativa manual e a rejeição automática
+  (assim o primeiro clique logo após uma rejeição automática também espera).
+  Caso contrário responde "credencial já rejeitada; tente
   novamente em N min ou atualize a credencial". Isso impede que cliques
   repetidos bloqueiem a conta no AD.
 - Pausa e estados bloqueados: `pause` vale em qualquer estado. Em `resume`, o
