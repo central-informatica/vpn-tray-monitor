@@ -21,9 +21,12 @@ type RotatingWriter struct {
 	maxFiles int
 	f        *os.File
 	size     int64
-	closed   bool
-	rename   func(from, to string) error
-	remove   func(name string) error
+	// retryAt: após uma rotação que falhou, só tenta de novo quando o arquivo
+	// passar deste tamanho (não repete a cada linha).
+	retryAt int64
+	closed  bool
+	rename  func(from, to string) error
+	remove  func(name string) error
 }
 
 // OpenRotating abre (ou cria) o log em modo append.
@@ -46,7 +49,7 @@ func (w *RotatingWriter) open() error {
 	if err := os.MkdirAll(filepath.Dir(w.path), 0o700); err != nil {
 		return err
 	}
-	f, err := os.OpenFile(w.path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+	f, err := shared.OpenAppendShared(w.path, 0o600)
 	if err != nil {
 		return err
 	}
@@ -67,7 +70,8 @@ func rotatedName(path string, n int) string {
 
 // rotate é best-effort: falhas de remove/rename (no Windows, Tail ou antivírus
 // segurando o arquivo) são ignoradas e o arquivo atual é reaberto em append,
-// para o log nunca morrer. A rotação é tentada de novo no próximo estouro.
+// para o log nunca morrer. Se o rename do arquivo atual falha, a rotação só é tentada de novo
+// depois que o arquivo crescer mais maxBytes/4 (retryAt).
 func (w *RotatingWriter) rotate() error {
 	if err := w.f.Close(); err != nil {
 		w.f = nil
@@ -81,7 +85,11 @@ func (w *RotatingWriter) rotate() error {
 	for i := w.maxFiles - 1; i >= 1; i-- {
 		_ = w.rename(rotatedName(w.path, i), rotatedName(w.path, i+1))
 	}
-	_ = w.rename(w.path, rotatedName(w.path, 1))
+	if err := w.rename(w.path, rotatedName(w.path, 1)); err != nil {
+		w.retryAt = w.size + max(w.maxBytes/4, 1)
+	} else {
+		w.retryAt = 0
+	}
 	return w.open()
 }
 
@@ -97,7 +105,7 @@ func (w *RotatingWriter) Write(p []byte) (int, error) {
 			return 0, err
 		}
 	}
-	if w.size > 0 && w.size+int64(len(p)) > w.maxBytes {
+	if w.size > 0 && w.size+int64(len(p)) > w.maxBytes && w.size >= w.retryAt {
 		if err := w.rotate(); err != nil {
 			return 0, fmt.Errorf("girando log: %w", err)
 		}

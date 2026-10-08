@@ -40,10 +40,11 @@ func main() { os.Exit(run()) }
 
 // Log da bandeja: um por usuário, em %LOCALAPPDATA%\VPNMonitor (o usuário não
 // lê a pasta do serviço). Pequeno e rotativo: só avisos da interface e o
-// ciclo de vida da bandeja. Limitação aceita: o mesmo usuário em duas
-// sessões (console + RDP) tem duas bandejas no mesmo arquivo; na rotação,
-// uma pode renomear o arquivo que a outra ainda usa e algumas linhas vão
-// parar no vpnmon-tray.1.log (nada se perde nem trava).
+// ciclo de vida da bandeja. O mesmo usuário em duas sessões (console + RDP)
+// tem duas bandejas no mesmo arquivo: o log é aberto com compartilhamento de
+// exclusão/renomeação, então uma rotação funciona mesmo com a outra aberta; a
+// outra segue escrevendo no arquivo renomeado (vpnmon-tray.1.log) até
+// reabri-lo, e algumas linhas vão parar lá (nada se perde nem trava).
 const (
 	trayLogName     = "vpnmon-tray.log"
 	trayLogMaxBytes = 1 << 20
