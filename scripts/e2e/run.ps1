@@ -109,12 +109,11 @@ try {
     $d1, $d2, $d3 = $delays[$keys[0]], $delays[$keys[1]], $delays[$keys[2]]
     $shown = ($keys | ForEach-Object { "$_=$($delays[$_])s" }) -join ', '
     # Esperas nominais ~5/10/20 s (base = intervalo de 5 s, dobrando, jitter
-    # ±20 %). Cada uma é medida na 1ª sondagem que a vê (a cada 0,5 s, mais a
-    # chamada ao pipe) com resolução de segundo: a medida pode sair até ~2 s
-    # menor, daí a folga de 2 s nas comparações.
-    $tol = 2
-    Assert-That ($d1 -lt $d2 + $tol -and $d2 -lt $d3 + $tol) "backoff crescente d1 < d2 < d3 (folga $tol s; $shown)"
-    Assert-That ($d3 + $tol -ge 2 * $d1) "backoff ao menos dobra entre a 1ª e a 3ª espera (folga $tol s; $shown)"
+    # ±20 %), medidas na 1ª sondagem que as vê (até ~2 s a menos). No CI veio
+    # 4/10/19 e 5/12/22: a ordem estrita tem margem. d3 − d1 ≥ 6 separa
+    # backoff dobrando (pior caso d1 ≈ 7, d3 ≈ 14,5) de espera constante (~5 s).
+    Assert-That ($d1 -lt $d2 -and $d2 -lt $d3) "backoff crescente d1 < d2 < d3 ($shown)"
+    Assert-That ($d3 - $d1 -ge 6) "backoff cresce ao menos 6 s entre a 1ª e a 3ª espera ($shown)"
     Invoke-Svc @('vpn', 'add', '--name', 'Link', '--entry', $LinkEntry, '--check', 'link') | Write-Host
     Wait-Until -TimeoutSeconds 15 -Message 'VPN Link (verificação link) aparece no status' -Condition {
         @((Get-VpnStatus).vpns | Where-Object { $_.name -eq 'Link' -and $_.checkKind -eq 'link' }).Count -eq 1
@@ -129,11 +128,13 @@ try {
     Assert-DataAcl
 
     Write-Step '6. Parada em até 10 s, com discagem em curso; nova partida'
-    # A tentativa N arma a espera (nextAttemptUnix = T > 0); quando a discagem
-    # começa, o status passa a nextAttemptUnix = 0 com a mesma tentativa e
-    # estado Reconectando, até a discagem falhar (~20 s contra o TEST-NET) e a
-    # tentativa N+1 armar a próxima espera. Discagem em curso = esse quadro
-    # visto depois de T, numa tentativa cuja espera foi vista armada.
+    # A tentativa N arma a espera (nextAttemptUnix = T > 0). Vencido T, o
+    # status zera nextAttemptUnix (ToView) já antes da fila e do RasDial, com a
+    # mesma tentativa e estado Reconectando, até a discagem falhar (~20 s
+    # contra o TEST-NET) e a tentativa N+1 armar a próxima espera. Discagem em
+    # curso = esse quadro há ≥ 3 s depois de T E a linha "discando" da Matriz
+    # no log do serviço com horário ≥ T.
+    $serviceLog = Join-Path $DataDir 'logs\vpnmon.log'
     $script:armedAttempt = -1
     $script:armedAt = [long]0
     Wait-Until -TimeoutSeconds 240 -IntervalMs 500 -Message 'discagem em curso' -Condition {
@@ -148,10 +149,19 @@ try {
             return $false
         }
         $now = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
-        $inDial = $script:armedAt -gt 0 -and $m.attempt -eq $script:armedAttempt -and
-            $m.state -eq 'Reconectando' -and $now -ge $script:armedAt
-        if ($inDial) { Write-Host "discagem em curso: $($now - $script:armedAt) s após T, tentativa $($m.attempt), estado $($m.state), nextAttemptUnix 0" }
-        $inDial
+        if (-not ($script:armedAt -gt 0 -and $m.attempt -eq $script:armedAttempt -and
+                $m.state -eq 'Reconectando' -and $now -ge $script:armedAt + 3)) {
+            return $false
+        }
+        # slog em texto: time=2026-10-08T23:44:40.123Z level=INFO msg=discando vpn=Matriz …
+        $dialLine = Get-Content $serviceLog -Tail 200 -ErrorAction SilentlyContinue |
+            Where-Object { $_ -match '^time=(\S+) .*\bmsg=discando\b.*\bvpn=Matriz(\s|$)' -and
+                [DateTimeOffset]::Parse($Matches[1]).ToUnixTimeSeconds() -ge $script:armedAt } |
+            Select-Object -Last 1
+        if (-not $dialLine) { return $false }
+        Write-Host "discagem em curso: $($now - $script:armedAt) s após T, tentativa $($m.attempt), estado $($m.state), nextAttemptUnix 0"
+        Write-Host "log do serviço: $dialLine"
+        $true
     }
     $sw = [Diagnostics.Stopwatch]::StartNew()
     & sc.exe stop VPNMonitor | Out-Null
@@ -160,6 +170,12 @@ try {
     }
     $sw.Stop()
     Assert-That ($sw.Elapsed.TotalSeconds -le 10) "parada em $([math]::Round($sw.Elapsed.TotalSeconds, 1)) s"
+    # A parada cancela a discagem: a entrada não pode ficar conectando.
+    Wait-Until -TimeoutSeconds 10 -Message "entrada $Entry desconectada após a parada" -Condition {
+        (Get-VpnConnection -Name $Entry -AllUserConnection).ConnectionStatus -eq 'Disconnected'
+    }
+    $rasdial = & rasdial.exe 2>&1 | Out-String
+    Assert-That ($rasdial -notmatch [regex]::Escape($Entry)) "rasdial não lista $Entry ($($rasdial.Trim()))"
     Start-Service VPNMonitor
     Wait-Until -TimeoutSeconds 30 -Message 'serviço de volta' -Condition { (Get-Service VPNMonitor).Status -eq 'Running' }
 
