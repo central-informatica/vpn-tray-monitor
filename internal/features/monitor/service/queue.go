@@ -9,7 +9,8 @@ import (
 
 // DialQueue garante uma discagem por vez entre todas as VPNs (§4.4).
 // Pedidos manuais passam na frente dos automáticos; dentro de cada classe,
-// ordem de chegada.
+// ordem de chegada. Manuais contínuos podem atrasar indefinidamente os
+// automáticos (aceito: pedido manual é raro).
 type DialQueue struct {
 	mu     sync.Mutex
 	busy   bool
@@ -24,6 +25,9 @@ type queueWaiter struct {
 
 // Acquire espera a vez. Devolve a função que libera a fila (idempotente).
 func (q *DialQueue) Acquire(ctx context.Context, manual bool) (func(), error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	q.mu.Lock()
 	if !q.busy {
 		q.busy = true
