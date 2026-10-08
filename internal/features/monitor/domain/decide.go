@@ -106,13 +106,13 @@ func Decide(s Status, in Input, p Params, env Env) Decision {
 	case InCheckNow:
 		onCheckNow(&d)
 	case InReconnect:
-		onReconnect(&d, in, p, env)
+		onReconnect(&d, in, env)
 	case InPause:
 		onPause(&d, in, env)
 	case InResume:
 		onResume(&d, in, p, env)
 	case InCredentialChanged:
-		onCredentialChanged(&d, in, p, env)
+		onCredentialChanged(&d, in, env)
 	}
 	return d
 }
@@ -153,6 +153,7 @@ func (d *Decision) goUp(p Params, now time.Time) {
 	d.Next.Attempt = 0
 	d.Next.NextAttempt = time.Time{}
 	d.Next.WasUp = true
+	d.Next.Blocked = "" // conectada: a memória de bloqueio acabou
 	d.set(Conectada, now)
 }
 
@@ -200,6 +201,9 @@ func onPowerResume(d *Decision, env Env) {
 
 func onLink(d *Decision, in Input, p Params, env Env) {
 	now := env.Now
+	if d.Next.Op == OpDial {
+		return // verificação atrasada: a discagem em curso é dona do estado
+	}
 	d.Next.Op = OpNone
 	d.Next.LastCheck = now
 	s := d.Next
@@ -248,6 +252,9 @@ func onLink(d *Decision, in Input, p Params, env Env) {
 
 func onReach(d *Decision, in Input, p Params, env Env) {
 	now := env.Now
+	if d.Next.Op == OpDial {
+		return // idem onLink
+	}
 	d.Next.Op = OpNone
 	d.Next.LastCheck = now
 	if !idle(d.Next) {
@@ -346,7 +353,7 @@ func resume(d *Decision, fp string, p Params, env Env) {
 	now := env.Now
 	d.Next.PausedUntil, d.Next.PausedIndefinite = time.Time{}, false
 	b := d.Next.Blocked
-	if b == CredencialInvalida && fp != "" && fp != d.Next.BlockedFP {
+	if b == CredencialInvalida && credChanged(fp, d.Next.BlockedFP) {
 		b = ""
 	}
 	if b != "" {

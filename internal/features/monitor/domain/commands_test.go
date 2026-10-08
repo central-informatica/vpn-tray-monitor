@@ -182,3 +182,73 @@ func TestGraceLinkEventDoesNotGoUpForPing(t *testing.T) {
 		t.Fatalf("alcance OK faz goUp: %+v", d.Next)
 	}
 }
+
+func rejectedCred() Status {
+	return st(CredencialInvalida, func(s *Status) {
+		s.Blocked, s.BlockedFP, s.RejectedAt = CredencialInvalida, "fp1", t0
+	})
+}
+
+func TestEmptyFingerprintNeverCountsAsChange(t *testing.T) {
+	d := Decide(rejectedCred(), Input{Kind: InReconnect, Fingerprint: ""}, params(), env(time.Second))
+	if d.Reply.Code != ReplyCredentialRejected || d.Action != OpNone {
+		t.Fatalf("fingerprint vazia não burla a janela: %+v", d)
+	}
+	d = Decide(rejectedCred(), Input{Kind: InCredentialChanged, Fingerprint: ""}, params(), env(0))
+	if d.Action != OpNone || d.Next.State != CredencialInvalida || d.Next.Blocked != CredencialInvalida {
+		t.Fatalf("credentialChanged vazio continua bloqueado: %+v", d)
+	}
+	paused := Decide(rejectedCred(), Input{Kind: InPause}, params(), env(0)).Next
+	if d := Decide(paused, Input{Kind: InResume, Fingerprint: ""}, params(), env(time.Minute)); d.Next.State != CredencialInvalida {
+		t.Fatalf("resume vazio volta ao bloqueio: %+v", d.Next)
+	}
+}
+
+func TestManualTryIsDecisiveForWindow(t *testing.T) {
+	s := rejectedCred()
+	s.LastManualTry = t0.Add(10 * time.Minute)
+	// 16 min após a rejeição, mas só 6 min após a última tentativa manual.
+	d := Decide(s, Input{Kind: InReconnect, Fingerprint: "fp1"}, params(), env(16*time.Minute))
+	if d.Reply.Code != ReplyCredentialRejected || d.Action != OpNone || !strings.Contains(d.Reply.Message, "9 min") {
+		t.Fatalf("a tentativa manual mais recente manda: %+v", d)
+	}
+}
+
+func TestPauseDuringManualDialKeepsBlockMemory(t *testing.T) {
+	d := Decide(rejectedCred(), Input{Kind: InReconnect, Fingerprint: "fp1"}, params(), env(15*time.Minute))
+	if d.Action != OpHangupDial || d.Next.Blocked != CredencialInvalida || d.Next.BlockedFP != "fp1" {
+		t.Fatalf("reconnect manual guarda a memória do bloqueio: %+v", d.Next)
+	}
+	// Credencial mudando no meio da discagem não mexe nela.
+	if c := Decide(d.Next, Input{Kind: InCredentialChanged, Fingerprint: "fp2"}, params(), env(15*time.Minute)); c.Action != OpNone || c.Next.State != Reconectando {
+		t.Fatalf("durante a discagem: %+v", c)
+	}
+	p := Decide(d.Next, Input{Kind: InPause}, params(), env(15*time.Minute+time.Second))
+	if !p.Cancel || p.Next.Blocked != CredencialInvalida {
+		t.Fatalf("pausa preserva: %+v", p.Next)
+	}
+	// O 691 atrasado é descartado; o resume volta ao bloqueio sem discar.
+	r := Decide(p.Next, Input{Kind: InResume, Fingerprint: "fp1"}, params(), env(16*time.Minute))
+	if r.Next.State != CredencialInvalida || r.Action != OpNone {
+		t.Fatalf("resume volta ao bloqueio: %+v", r)
+	}
+	// A janela conta da tentativa manual (LastManualTry > RejectedAt).
+	again := Decide(r.Next, Input{Kind: InReconnect, Fingerprint: "fp1"}, params(), env(20*time.Minute))
+	if again.Reply.Code != ReplyCredentialRejected || again.Action != OpNone {
+		t.Fatalf("nova tentativa só após 15 min da manual: %+v", again)
+	}
+	// Credencial nova no resume verifica normalmente.
+	if r := Decide(p.Next, Input{Kind: InResume, Fingerprint: "fp2"}, params(), env(16*time.Minute)); r.Next.State != Desconhecido || r.Action != OpProbeLink {
+		t.Fatalf("credencial nova: %+v", r)
+	}
+}
+
+func TestLateChecksIgnoredWhileDialing(t *testing.T) {
+	s := st(Reconectando, withOp(OpDial))
+	for _, in := range []Input{{Kind: InLinkResult, Network: true}, {Kind: InLinkResult, Network: true, LinkUp: true}, {Kind: InReachResult, ReachOK: true}} {
+		d := Decide(s, in, params(), env(0))
+		if d.Next.Op != OpDial || d.Action != OpNone || d.Next.State != Reconectando {
+			t.Errorf("%+v: %+v", in, d)
+		}
+	}
+}
