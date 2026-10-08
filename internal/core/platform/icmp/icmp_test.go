@@ -40,3 +40,22 @@ func TestResolveIPv4Literal(t *testing.T) {
 		t.Fatal("IPv6 literal deve falhar")
 	}
 }
+
+func TestDecodeReplyShortBuffer(t *testing.T) {
+	r := DecodeReply(make([]byte, 11))
+	if r.OK || r.Status != IP_GENERAL_FAILURE {
+		t.Fatalf("buffer curto não pode ser sucesso: %+v", r)
+	}
+}
+
+func TestClassifyEchoFailure(t *testing.T) {
+	if r, err := classifyEchoFailure(11003); err != nil || r.OK || r.Status != 11003 {
+		t.Fatalf("%+v %v", r, err)
+	}
+	if r, err := classifyEchoFailure(0); err != nil || r.OK || r.Status != IP_REQ_TIMED_OUT {
+		t.Fatalf("%+v %v", r, err)
+	}
+	if _, err := classifyEchoFailure(87); err == nil {
+		t.Fatal("ERROR_INVALID_PARAMETER deve ser erro")
+	}
+}

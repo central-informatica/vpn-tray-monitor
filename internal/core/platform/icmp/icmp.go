@@ -8,6 +8,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"net"
+	"syscall"
 	"time"
 )
 
@@ -30,6 +31,7 @@ const (
 	IP_DEST_NET_UNREACHABLE  = 11002
 	IP_DEST_HOST_UNREACHABLE = 11003
 	IP_REQ_TIMED_OUT         = 11010
+	IP_GENERAL_FAILURE       = 11050
 )
 
 // Layout de ICMP_ECHO_REPLY em x64 (alinhamento natural).
@@ -39,8 +41,13 @@ const (
 	ReplySize      = 40 // Address,Status,RTT(12) DataSize,Reserved(4) Data*(8) Options(16)
 )
 
-// DecodeReply lê Status e RoundTripTime do buffer de resposta.
+// DecodeReply lê Status e RoundTripTime do buffer de resposta. Buffer curto
+// demais (< 12 bytes) devolve OK=false com Status IP_GENERAL_FAILURE, nunca
+// sucesso.
 func DecodeReply(b []byte) Result {
+	if len(b) < replyOffRTT+4 {
+		return Result{Status: IP_GENERAL_FAILURE}
+	}
 	st := binary.LittleEndian.Uint32(b[replyOffStatus:])
 	rtt := binary.LittleEndian.Uint32(b[replyOffRTT:])
 	return Result{OK: st == IP_SUCCESS, Status: st, RTT: time.Duration(rtt) * time.Millisecond}
@@ -71,4 +78,21 @@ func ResolveIPv4(ctx context.Context, host string) (net.IP, error) {
 		return nil, fmt.Errorf("%q não resolveu para IPv4", host)
 	}
 	return ips[0], nil
+}
+
+// classifyEchoFailure interpreta o GetLastError de um IcmpSendEcho2 que
+// devolveu 0 respostas. Códigos IP_STATUS (11000–11999) são o motivo informado
+// pelo Windows (ex.: 11003 destino inacessível, 11010 tempo esgotado) e viram
+// resultado válido; 0 não traz informação e vale como tempo esgotado; qualquer
+// outro (ERROR_INVALID_PARAMETER, falta de memória…) é falha da API, não "sem
+// resposta", e retorna erro.
+func classifyEchoFailure(errno uint32) (Result, error) {
+	switch {
+	case errno >= 11000 && errno <= 11999:
+		return Result{Status: errno}, nil
+	case errno == 0:
+		return Result{Status: IP_REQ_TIMED_OUT}, nil
+	default:
+		return Result{}, fmt.Errorf("IcmpSendEcho2: %w", syscall.Errno(errno))
+	}
 }

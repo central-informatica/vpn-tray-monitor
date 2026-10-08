@@ -5,6 +5,7 @@ package icmp
 import (
 	"context"
 	"fmt"
+	"syscall"
 	"time"
 	"unsafe"
 
@@ -46,11 +47,15 @@ func (winPinger) Ping(ctx context.Context, host string, timeout time.Duration) (
 	if ms <= 0 {
 		ms = 1000
 	}
-	n, _, _ := procIcmpSendEcho2.Call(h, 0, 0, 0, uintptr(dst),
+	n, _, callErr := procIcmpSendEcho2.Call(h, 0, 0, 0, uintptr(dst),
 		uintptr(unsafe.Pointer(&payload[0])), uintptr(len(payload)), 0,
 		uintptr(unsafe.Pointer(&reply[0])), uintptr(len(reply)), uintptr(ms))
 	if n == 0 {
-		return Result{Status: IP_REQ_TIMED_OUT}, nil // sem resposta: resultado válido
+		var errno uint32
+		if e, ok := callErr.(syscall.Errno); ok {
+			errno = uint32(e)
+		}
+		return classifyEchoFailure(errno)
 	}
 	return DecodeReply(reply), nil
 }

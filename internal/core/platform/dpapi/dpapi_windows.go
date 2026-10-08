@@ -20,10 +20,14 @@ func blob(b []byte) *windows.DataBlob {
 	return &windows.DataBlob{Size: uint32(len(b)), Data: &b[0]}
 }
 
-func takeOut(out *windows.DataBlob) []byte {
+func takeOut(out *windows.DataBlob, wipe bool) []byte {
 	defer windows.LocalFree(windows.Handle(unsafe.Pointer(out.Data)))
 	res := make([]byte, out.Size)
-	copy(res, unsafe.Slice(out.Data, out.Size))
+	src := unsafe.Slice(out.Data, out.Size)
+	copy(res, src)
+	if wipe {
+		clear(src) // texto em claro: zera antes do LocalFree
+	}
 	return res
 }
 
@@ -34,7 +38,7 @@ func (machine) Protect(plain, entropy []byte) ([]byte, error) {
 	if err := windows.CryptProtectData(blob(plain), nil, blob(entropy), 0, nil, flags, &out); err != nil {
 		return nil, err
 	}
-	return takeOut(&out), nil
+	return takeOut(&out, false), nil
 }
 
 func (machine) Unprotect(b, entropy []byte) ([]byte, error) {
@@ -42,5 +46,5 @@ func (machine) Unprotect(b, entropy []byte) ([]byte, error) {
 	if err := windows.CryptUnprotectData(blob(b), nil, blob(entropy), 0, nil, windows.CRYPTPROTECT_UI_FORBIDDEN, &out); err != nil {
 		return nil, err
 	}
-	return takeOut(&out), nil
+	return takeOut(&out, true), nil
 }
