@@ -60,9 +60,13 @@ jobs:
           go-version-file: go.mod
       - name: govulncheck (linux e windows)
         shell: bash
+        # Instala uma vez para o host: `GOOS=windows go run` compilaria a
+        # própria ferramenta para Windows e o Linux não conseguiria executá-la.
         run: |
-          go run golang.org/x/vuln/cmd/govulncheck@v1.8.0 ./...
-          GOOS=windows go run golang.org/x/vuln/cmd/govulncheck@v1.8.0 ./...
+          go install golang.org/x/vuln/cmd/govulncheck@v1.8.0
+          govulncheck="$(go env GOPATH)/bin/govulncheck"
+          "$govulncheck" ./...
+          GOOS=windows "$govulncheck" ./...
 
   codeql:
     # No Windows: assim o CodeQL analisa também os arquivos *_windows.go.
