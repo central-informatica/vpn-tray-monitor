@@ -184,6 +184,11 @@ func TestCheckLocalDoesNotDial(t *testing.T) {
 	if code := te.run("check", "Matriz"); code != 0 || !strings.Contains(te.out.String(), "respondeu em 12ms") {
 		t.Fatalf("eco: %d %q", code, te.out)
 	}
+	// Mesmo arredondamento do serviço: um eco abaixo de 1 ms não vira "0ms".
+	pinger.RTT = 300 * time.Microsecond
+	if code := te.run("check", "Matriz"); code != 0 || !strings.Contains(te.out.String(), "respondeu em 1ms") {
+		t.Fatalf("eco rápido: %d %q", code, te.out)
+	}
 	r.SetActive("VPN Filial")
 	if code := te.run("check", "Filial"); code != 0 || !strings.Contains(te.out.String(), "verificação link") {
 		t.Fatalf("link: %d %q", code, te.out)
