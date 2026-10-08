@@ -66,8 +66,11 @@ func (w *logWin) load() {
 		}
 		// O controle de edição do Windows quer \r\n.
 		_ = w.text.SetText(strings.ReplaceAll(strings.ReplaceAll(tail.Text, "\r\n", "\n"), "\n", "\r\n"))
-		n := len([]rune(w.text.Text()))
-		w.text.SetTextSelection(n, n)
+		// Cursor no fim sem contar caracteres (EM_SETSEL conta em UTF-16):
+		// seleciona tudo (fim -1 = fim do texto, cursor lá) e desfaz a
+		// seleção (início -1), que mantém o cursor onde está.
+		w.text.SetTextSelection(0, -1)
+		w.text.SetTextSelection(-1, -1)
 		w.text.ScrollToCaret()
 	})
 }

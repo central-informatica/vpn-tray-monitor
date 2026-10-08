@@ -12,7 +12,6 @@ import (
 
 // menuBuilder acumula erros de walk ao montar o menu (só vão ao log).
 type menuBuilder struct {
-	t   *Tray
 	err error
 }
 
@@ -74,7 +73,7 @@ func disposeMenus(l *walk.ActionList) {
 func (t *Tray) buildMenu(m viewmodel.Model) {
 	root := t.ni.ContextMenu().Actions()
 	disposeMenus(root)
-	b := &menuBuilder{t: t}
+	b := &menuBuilder{}
 	b.keep(root.Clear())
 
 	b.item(root, m.Header, false, nil)

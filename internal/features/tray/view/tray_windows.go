@@ -4,6 +4,7 @@ package view
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"time"
@@ -57,6 +58,9 @@ var iconNames = map[viewmodel.Icon]string{
 // Run cria o ícone e roda o laço de mensagens até "Sair da bandeja".
 // Precisa ser chamado da goroutine principal (walk trava a thread no init).
 func Run(o Options) (int, error) {
+	if o.Caller == nil {
+		return 1, errors.New("view: Options.Caller é obrigatório")
+	}
 	if o.Log == nil {
 		o.Log = slog.New(slog.DiscardHandler)
 	}
@@ -71,11 +75,17 @@ func Run(o Options) (int, error) {
 	if err != nil {
 		return 1, fmt.Errorf("criando o ícone da bandeja: %w", err)
 	}
-	defer ni.Dispose()
 	t := &Tray{o: o, app: app, ni: ni, vm: viewmodel.New(o.AppVersion)}
-	if err := t.loadIcons(); err != nil {
+	// Remove o ícone da bandeja antes de liberar as imagens que ele usa.
+	defer func() {
+		ni.Dispose()
+		disposeIcons(t.icons)
+	}()
+	icons, dpi, err := t.loadIcons()
+	if err != nil {
 		return 1, err
 	}
+	t.icons, t.dpi = icons, dpi
 	// O menu é montado na hora de abrir: um menu aberto não se redesenha
 	// sozinho, e assim os tempos relativos saem sempre atuais.
 	ni.ShowingContextMenu().Attach(func() bool {
@@ -107,26 +117,31 @@ func (t *Tray) trayDPI() int {
 
 // loadIcons gera os quatro ícones a partir do PNG do tamanho certo para o
 // DPI atual (16 px a 96 DPI), em vez de deixar o Windows esticar um menor.
-func (t *Tray) loadIcons() error {
+// Não troca os ícones em uso: quem chama decide quando liberar os antigos.
+// Em erro, libera os que já tinha criado.
+func (t *Tray) loadIcons() (map[viewmodel.Icon]*walk.Icon, int, error) {
 	dpi := t.trayDPI()
 	icons := map[viewmodel.Icon]*walk.Icon{}
 	for k, name := range iconNames {
 		img, err := assets.Image(name, 16*dpi/96)
 		if err != nil {
-			return err
+			disposeIcons(icons)
+			return nil, 0, err
 		}
 		ic, err := walk.NewIconFromImageForDPI(img, dpi)
 		if err != nil {
-			return fmt.Errorf("ícone %s: %w", name, err)
+			disposeIcons(icons)
+			return nil, 0, fmt.Errorf("ícone %s: %w", name, err)
 		}
 		icons[k] = ic
 	}
-	old := t.icons
-	t.icons, t.dpi = icons, dpi
-	for _, ic := range old {
+	return icons, dpi, nil
+}
+
+func disposeIcons(icons map[viewmodel.Icon]*walk.Icon) {
+	for _, ic := range icons {
 		ic.Dispose()
 	}
-	return nil
 }
 
 // pump leva os eventos do cliente para a thread da interface, em ordem.
@@ -178,25 +193,40 @@ func (t *Tray) apply(ev client.Event) {
 // é percebida (a cada tique de 1 s): o NotifyIcon do walk trata o
 // WM_DPICHANGED só redesenhando o mesmo ícone, sem gancho público; então os
 // ícones são gerados de novo no tamanho do DPI novo.
+//
+// Os ícones antigos só são liberados depois que o novo foi aplicado, e
+// t.last só guarda o que deu certo: um erro é tentado de novo no próximo tique.
 func (t *Tray) render(m viewmodel.Model, force bool) {
-	if dpi := t.trayDPI(); dpi != t.dpi {
-		if err := t.loadIcons(); err != nil {
+	if cur := t.trayDPI(); cur != t.dpi {
+		icons, dpi, err := t.loadIcons()
+		if err != nil {
+			dpi = cur
 			t.o.Log.Warn("gerando ícones para o DPI novo", "dpi", dpi, "erro", err)
+		} else if err := t.ni.SetIcon(icons[m.Icon]); err != nil {
+			disposeIcons(icons)
+			t.o.Log.Warn("trocando o ícone para o DPI novo", "dpi", dpi, "erro", err)
 		} else {
+			old := t.icons
+			t.icons, t.dpi = icons, dpi
+			t.last.Icon = m.Icon
+			disposeIcons(old)
 			force = true
 		}
 	}
 	if force || m.Icon != t.last.Icon {
 		if err := t.ni.SetIcon(t.icons[m.Icon]); err != nil {
 			t.o.Log.Warn("trocando o ícone", "erro", err)
+		} else {
+			t.last.Icon = m.Icon
 		}
 	}
 	if force || m.ToolTip != t.last.ToolTip {
 		if err := t.ni.SetToolTip(m.ToolTip); err != nil {
 			t.o.Log.Warn("trocando o tooltip", "erro", err)
+		} else {
+			t.last.ToolTip = m.ToolTip
 		}
 	}
-	t.last = m
 }
 
 func (t *Tray) showBalloon(b viewmodel.Balloon) {
@@ -217,7 +247,8 @@ func (t *Tray) showBalloon(b viewmodel.Balloon) {
 // call faz o pedido fora da thread da interface e devolve o resultado nela.
 func (t *Tray) call(c viewmodel.Command, out any, done func(error)) {
 	go func() {
-		ctx, cancel := context.WithTimeout(context.Background(), callTimeout)
+		// Cancelado no Exit: "Sair da bandeja" não espera pedidos pendentes.
+		ctx, cancel := context.WithTimeout(t.app.Context(), callTimeout)
 		defer cancel()
 		err := t.o.Caller.Call(ctx, c.Type, c.Payload, out)
 		t.app.Synchronize(func() { done(err) })
