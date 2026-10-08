@@ -9,6 +9,7 @@ import (
 	"io"
 	"io/fs"
 	"os"
+	"os/signal"
 	"strings"
 	"time"
 
@@ -59,6 +60,9 @@ type env struct {
 	isService      func() (bool, error)
 	runService     func(svc.Hooks) error
 	now            func() time.Time
+	// interrupt deriva o contexto que o Ctrl+C cancela (`run`); injetável
+	// porque no Windows o processo não consegue mandar os.Interrupt a si mesmo.
+	interrupt func(context.Context) (context.Context, context.CancelFunc)
 }
 
 func defaultEnv() env {
@@ -76,6 +80,9 @@ func defaultEnv() env {
 		},
 		platform: realPlatform, install: svc.Install, uninstall: svc.Uninstall,
 		isService: svc.IsService, runService: svc.Run, now: time.Now,
+		interrupt: func(ctx context.Context) (context.Context, context.CancelFunc) {
+			return signal.NotifyContext(ctx, os.Interrupt)
+		},
 	}
 }
 

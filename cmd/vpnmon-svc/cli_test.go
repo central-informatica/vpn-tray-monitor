@@ -50,6 +50,7 @@ func newTestEnv(t *testing.T) *testEnv {
 		isService:  func() (bool, error) { return false, nil },
 		runService: func(svc.Hooks) error { return nil },
 		now:        func() time.Time { return time.Date(2026, 10, 7, 12, 0, 0, 0, time.UTC) },
+		interrupt:  func(ctx context.Context) (context.Context, context.CancelFunc) { return context.WithCancel(ctx) },
 	}
 	return te
 }

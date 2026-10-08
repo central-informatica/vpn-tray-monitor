@@ -8,7 +8,6 @@ import (
 	"log/slog"
 	"math/rand/v2"
 	"os"
-	"os/signal"
 	"path/filepath"
 	"sync"
 	"sync/atomic"
@@ -463,7 +462,7 @@ func cmdRun(e env) error {
 	if err != nil {
 		return err
 	}
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+	ctx, stop := e.interrupt(context.Background())
 	defer stop()
 	fmt.Fprintf(e.stdout, "VPN Monitor %s em modo console; log em %s; Ctrl+C para parar\n", version, l.LogFile)
 	return serve(ctx, p, l, shared.RealClock{}, nil)

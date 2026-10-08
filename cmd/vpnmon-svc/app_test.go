@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -613,7 +614,8 @@ func TestServiceMainRunErrorExitsNonZero(t *testing.T) {
 	}
 }
 
-// `run` usa a mesma montagem e termina com Ctrl+C.
+// `run` usa a mesma montagem e termina com Ctrl+C. O Ctrl+C é injetado: no
+// Windows um processo não consegue mandar os.Interrupt a si mesmo.
 func TestCmdRunStopsOnInterrupt(t *testing.T) {
 	te := newTestEnv(t)
 	te.writeConfig(t, "Matriz")
@@ -625,22 +627,49 @@ func TestCmdRunStopsOnInterrupt(t *testing.T) {
 	p := testPlatform(fake.NewRAS("VPN Matriz"), events, &fake.ACL{})
 	p.Listen = func() (net.Listener, error) { return ln, nil }
 	te.platform = func() (Platform, error) { return p, nil }
+	ctrlC := make(chan struct{})
+	te.interrupt = func(parent context.Context) (context.Context, context.CancelFunc) {
+		ctx, cancel := context.WithCancel(parent)
+		go func() {
+			select {
+			case <-ctrlC:
+				cancel()
+			case <-ctx.Done():
+			}
+		}()
+		return ctx, cancel
+	}
 	done := make(chan int, 1)
 	go func() { done <- runCLI([]string{"run"}, te.env) }()
-	waitFor(t, func() bool { return hasEvent(events.Snapshot(), "info", "iniciado") })
-	self, _ := os.FindProcess(os.Getpid())
-	if err := self.Signal(os.Interrupt); err != nil {
-		t.Skip("sinal indisponível: ", err)
-	}
-	select {
-	case code := <-done:
-		if code != 0 {
-			t.Fatalf("código %d: %s", code, te.errb)
+	var once sync.Once
+	press := func() { once.Do(func() { close(ctrlC) }) }
+	// Mesmo se o teste falhar no meio, o run para (e fecha o log) antes de o
+	// TempDir ser apagado: no Windows o log aberto impede a remoção.
+	t.Cleanup(func() {
+		press()
+		select {
+		case <-done:
+		case <-time.After(10 * time.Second):
+			t.Error("run não terminou na limpeza")
 		}
+	})
+	waitFor(t, func() bool { return hasEvent(events.Snapshot(), "info", "iniciado") })
+	press()
+	var code int
+	select {
+	case code = <-done:
+		done <- code // a limpeza também espera por ele
 	case <-time.After(10 * time.Second):
 		t.Fatal("run não terminou com Ctrl+C")
 	}
+	if code != 0 {
+		t.Fatalf("código %d: %s", code, te.errb)
+	}
 	if !strings.Contains(te.out.String(), "Ctrl+C") || !hasEvent(events.Snapshot(), "info", "parado") {
 		t.Fatalf("%q %+v", te.out, events.Snapshot())
+	}
+	// O run fechou o log ao sair: dá para apagá-lo (no Windows, aberto falharia).
+	if err := os.Remove(filepath.Join(te.dir, "logs", "vpnmon.log")); err != nil {
+		t.Fatalf("log ainda aberto ou ausente: %v", err)
 	}
 }
