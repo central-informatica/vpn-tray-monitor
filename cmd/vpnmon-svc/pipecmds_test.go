@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"path/filepath"
 	"strings"
@@ -240,5 +241,52 @@ func TestCommandTableIsSingleSource(t *testing.T) {
 		if strings.Contains(te.errb.String(), "comando desconhecido") {
 			t.Errorf("%s não despachado: %q", name, te.errb)
 		}
+	}
+}
+
+// status --json devolve o snapshot do protocolo, legível por scripts (e2e).
+func TestStatusJSON(t *testing.T) {
+	te := newTestEnv(t)
+	startService(t, te)
+	waitFor(t, func() bool { return stateVia(te) == ipc.StateConectada })
+	if code := te.run("status", "--json"); code != 0 {
+		t.Fatalf("status --json: %d %q", code, te.errb)
+	}
+	var snap ipc.Snapshot
+	if err := json.Unmarshal(te.out.Bytes(), &snap); err != nil {
+		t.Fatalf("saída não é JSON: %v\n%s", err, te.out)
+	}
+	if len(snap.VPNs) != 1 || snap.VPNs[0].Name != "Matriz" || snap.VPNs[0].State != ipc.StateConectada {
+		t.Fatalf("snapshot: %+v", snap)
+	}
+	if code := te.run("status", "--json", "x"); code != 2 {
+		t.Fatalf("argumento extra: %d", code)
+	}
+	if code := te.run("status", "--yaml"); code != 2 {
+		t.Fatalf("flag desconhecida: %d", code)
+	}
+}
+
+// O texto do status mostra config inválida e o prazo do bloqueio de credencial.
+func TestFormatStatusConfigAndBlocked(t *testing.T) {
+	now := time.Date(2026, 10, 7, 15, 0, 0, 0, time.UTC)
+	snap := ipc.Snapshot{
+		Config: &ipc.ConfigStatus{OK: false, Message: "config.json inválido",
+			Fields: []config.FieldError{{Field: "vpns[0].check.port", Message: "obrigatória"}}},
+		VPNs: []ipc.VPNView{{Name: "Matriz", State: "CredencialInvalida", BlockedUntilUnix: now.Add(time.Hour).Unix()}},
+	}
+	out := formatStatus(snap, now)
+	for _, want := range []string{"aviso: config.json inválido", "vpns[0].check.port: obrigatória", "bloqueada até"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("faltou %q em:\n%s", want, out)
+		}
+	}
+	snap.Config = &ipc.ConfigStatus{OK: true}
+	snap.VPNs[0].BlockedUntilUnix = now.Add(-time.Minute).Unix()
+	if out := formatStatus(snap, now); strings.Contains(out, "aviso") || strings.Contains(out, "bloqueada") {
+		t.Fatalf("config ok/prazo vencido não devem aparecer: %s", out)
+	}
+	if out := formatStatus(ipc.Snapshot{Config: &ipc.ConfigStatus{Message: "x"}}, now); !strings.Contains(out, "aviso") || !strings.Contains(out, "nenhuma VPN") {
+		t.Fatalf("sem VPNs: %s", out)
 	}
 }

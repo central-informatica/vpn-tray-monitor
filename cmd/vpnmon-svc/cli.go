@@ -26,7 +26,7 @@ import (
 const usage = `uso: vpnmon-svc <comando>
 
   run                                  modo console, para depurar
-  status                               estado de cada VPN (via pipe)
+  status [--json]                      estado de cada VPN (via pipe)
   check <vpn>                          verificação única, sem discar; sai com 1
                                        se sem rede, enlace caído ou alvo falhando
   vpn add --name N --entry E [--check ping|tcp|link] [--host H] [--port P]
@@ -172,7 +172,7 @@ func dispatch(args []string, e env) error {
 // são tratados antes, em dispatch.
 var commands = map[string]func(rest []string, e env) error{
 	"run":     noArgs("run", cmdRun),
-	"status":  noArgs("status", cmdStatus),
+	"status":  cmdStatus,
 	"check":   cmdCheck,
 	"vpn":     cmdVPN,
 	"install": noArgs("install", cmdInstall),
