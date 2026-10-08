@@ -181,8 +181,8 @@ func TestWindowsEnsurePolicyRepairs(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { _ = uninstallNamed(name) })
 	defer s.Close()
-	t.Cleanup(func() { _ = s.Delete() })
 	if acts, _ := s.RecoveryActions(); len(acts) != 0 {
 		t.Fatalf("serviço novo já com recuperação: %v", acts)
 	}

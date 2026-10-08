@@ -780,3 +780,52 @@ func TestServiceMainEnsuresPolicyBeforeStartupFails(t *testing.T) {
 		t.Fatalf("laço %d, EnsurePolicy chamado %d vezes", code, calls.Load())
 	}
 }
+
+// Ensure vem antes de paths(): com o diretório de dados falhando, já foi chamado.
+func TestServiceMainEnsuresPolicyBeforePaths(t *testing.T) {
+	te := newTestEnv(t)
+	te.isService = func() (bool, error) { return true, nil }
+	te.dataDir = func() (string, error) { return "", errors.New("sem diretório") }
+	var calls atomic.Int32
+	te.ensurePolicy = func() error { calls.Add(1); return nil }
+	var code uint32
+	te.runService = func(h svc.Hooks) error {
+		code = svc.Loop(h, make(chan svc.Request), func(svc.State) {})
+		return nil
+	}
+	te.run()
+	if code == 0 || calls.Load() != 1 {
+		t.Fatalf("laço %d, EnsurePolicy chamado %d vezes", code, calls.Load())
+	}
+}
+
+// Sem erro de política, não sai Warning nenhum.
+func TestServiceMainNoPolicyWarningOnSuccess(t *testing.T) {
+	te := newTestEnv(t)
+	te.writeConfig(t, "Matriz")
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	events := &logging.RecordingSink{}
+	p := testPlatform(fake.NewRAS("VPN Matriz"), events, &fake.ACL{})
+	p.Listen = func() (net.Listener, error) { return ln, nil }
+	te.platform = func() (Platform, error) { return p, nil }
+	te.isService = func() (bool, error) { return true, nil }
+	te.ensurePolicy = func() error { return nil }
+	te.runService = func(h svc.Hooks) error {
+		reqs := make(chan svc.Request)
+		finished := make(chan uint32, 1)
+		go func() { finished <- svc.Loop(h, reqs, func(svc.State) {}) }()
+		waitFor(t, func() bool { return hasEvent(events.Snapshot(), "info", "iniciado") })
+		reqs <- svc.Request{Cmd: svc.CmdStop}
+		<-finished
+		return nil
+	}
+	if rc := te.run(); rc != 0 {
+		t.Fatalf("saída %d", rc)
+	}
+	if hasEvent(events.Snapshot(), "warning", "") {
+		t.Fatalf("Warning inesperado: %+v", events.Snapshot())
+	}
+}

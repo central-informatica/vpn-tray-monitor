@@ -120,7 +120,7 @@ func installNamed(name, display, exePath string, deps []string, args ...string) 
 }
 
 // readPolicy lê a política atual; o que não der para ler fica zerado (e
-// por isso diverge e é regravado).
+// por isso diverge e é regravado: leitura que falha conta como divergência).
 func readPolicy(s *mgr.Service) Policy {
 	var p Policy
 	if acts, err := s.RecoveryActions(); err == nil {
@@ -150,6 +150,7 @@ func readPolicy(s *mgr.Service) Policy {
 func applyPolicy(s *mgr.Service) error {
 	want := WantedPolicy()
 	ch := DiffPolicy(readPolicy(s), want)
+	var errs []error // tenta as três gravações e junta as falhas
 	if ch.Recovery {
 		var actions []mgr.RecoveryAction
 		for _, a := range want.Actions {
@@ -163,35 +164,43 @@ func applyPolicy(s *mgr.Service) error {
 	// não crash: sem este flag a recuperação não dispararia.
 	if ch.NonCrash {
 		if err := s.SetRecoveryActionsOnNonCrashFailures(want.NonCrash); err != nil {
-			return fmt.Errorf("configurando recuperação em falhas sem crash: %w", err)
+			errs = append(errs, fmt.Errorf("configurando recuperação em falhas sem crash: %w", err))
 		}
 	}
 	if ch.Preshutdown {
 		info := struct{ PreshutdownTimeout uint32 }{uint32(want.Preshutdown / time.Millisecond)}
 		if err := windows.ChangeServiceConfig2(s.Handle, windows.SERVICE_CONFIG_PRESHUTDOWN_INFO,
 			(*byte)(unsafe.Pointer(&info))); err != nil {
-			return fmt.Errorf("configurando tempo de preshutdown: %w", err)
+			errs = append(errs, fmt.Errorf("configurando tempo de preshutdown: %w", err))
 		}
 	}
-	return nil
+	return errors.Join(errs...)
 }
 
 // EnsurePolicy reaplica a política do SCM ao serviço VPNMonitor (só o que
 // diverge). O serviço chama na partida: é o que garante a política numa
-// instalação pelo MSI. Como LocalSystem, o serviço tem SERVICE_ALL_ACCESS
-// sobre si mesmo no descritor padrão do SCM.
+// instalação pelo MSI. O SYSTEM tem acesso total ao serviço pela ACE do grupo
+// Administradores (BA) do descritor padrão do SCM.
 func EnsurePolicy() error { return ensurePolicyNamed(ServiceName) }
 
 func ensurePolicyNamed(name string) error {
-	m, err := mgr.Connect()
+	scm, err := windows.OpenSCManager(nil, nil, windows.SC_MANAGER_CONNECT)
 	if err != nil {
 		return err
 	}
-	defer m.Disconnect()
-	s, err := m.OpenService(name)
+	defer windows.CloseServiceHandle(scm)
+	n, err := windows.UTF16PtrFromString(name)
 	if err != nil {
 		return err
 	}
+	// Direitos mínimos; SERVICE_START é exigido por ChangeServiceConfig2 ao
+	// definir ações SC_ACTION_RESTART.
+	h, err := windows.OpenService(scm, n,
+		windows.SERVICE_QUERY_CONFIG|windows.SERVICE_CHANGE_CONFIG|windows.SERVICE_START)
+	if err != nil {
+		return err
+	}
+	s := &mgr.Service{Name: name, Handle: h}
 	defer s.Close()
 	return applyPolicy(s)
 }
