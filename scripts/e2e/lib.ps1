@@ -48,17 +48,25 @@ function Wait-Until {
 }
 
 # Invoke-Msiexec roda o msiexec em silêncio com log detalhado e devolve o
-# código de saída (0 e 3010 = sucesso).
+# código de saída (0 e 3010 = sucesso). Com prazo: um msiexec preso (ex.:
+# serviço que não para) vira erro com o fim do log, não o timeout do job.
 function Invoke-Msiexec {
     param(
         [Parameter(Mandatory)][ValidateSet('/i', '/x')][string]$Mode,
         [Parameter(Mandatory)][string]$Msi,
         [Parameter(Mandatory)][string]$LogFile,
-        [string[]]$Properties = @()
+        [string[]]$Properties = @(),
+        [int]$TimeoutMs = 600000
     )
     $msiArgs = @($Mode, "`"$Msi`"", '/qn', '/norestart', '/l*v', "`"$LogFile`"") + $Properties
     Write-Host "msiexec $($msiArgs -join ' ')"
-    $p = Start-Process -FilePath 'msiexec.exe' -ArgumentList $msiArgs -Wait -PassThru
+    $p = Start-Process -FilePath 'msiexec.exe' -ArgumentList $msiArgs -PassThru
+    $null = $p.Handle # guarda o handle: sem ele o ExitCode vem vazio
+    if (-not $p.WaitForExit($TimeoutMs)) {
+        $tail = if (Test-Path $LogFile) { (Get-Content $LogFile -Tail 40) -join [Environment]::NewLine } else { '(sem log)' }
+        $svc = & sc.exe queryex VPNMonitor 2>&1 | Out-String
+        throw "msiexec $Mode $(Split-Path -Leaf $Msi) não terminou em $($TimeoutMs / 1000) s (PID $($p.Id)).$([Environment]::NewLine)sc queryex:$([Environment]::NewLine)$svc$([Environment]::NewLine)fim do log:$([Environment]::NewLine)$tail"
+    }
     return $p.ExitCode
 }
 
@@ -76,6 +84,19 @@ function Invoke-Svc {
 # nextAttemptUnix e lastError só quando há).
 function Get-VpnStatus {
     return (Invoke-Svc @('status', '--json') | ConvertFrom-Json)
+}
+
+# Get-VpnView devolve a VPN do snapshot pelo nome.
+function Get-VpnView {
+    param([Parameter(Mandatory)][string]$Name)
+    return @((Get-VpnStatus).vpns | Where-Object name -EQ $Name)[0]
+}
+
+# Get-NextAttemptUnix: nextAttemptUnix é omitempty (0 = sem espera armada).
+function Get-NextAttemptUnix {
+    param([Parameter(Mandatory)]$View)
+    if ($View.PSObject.Properties['nextAttemptUnix']) { return [long]$View.nextAttemptUnix }
+    return [long]0
 }
 
 function Get-InstalledVersion {
@@ -175,12 +196,39 @@ function Assert-EventSource {
     Assert-That ($raw -eq '%SystemRoot%\System32\EventCreate.exe') "EventMessageFile = $raw"
 }
 
+# Save-DiagnosticLog junta o diagnóstico em -LogDir. Cada coleta é
+# independente e nunca lança: no catch do roteiro, não pode mascarar o erro
+# original.
 function Save-DiagnosticLog {
     param([Parameter(Mandatory)][string]$LogDir)
-    $logs = Join-Path $script:DataDir 'logs'
-    if (Test-Path $logs) { Copy-Item "$logs\*" $LogDir -Force -ErrorAction SilentlyContinue }
-    Get-WinEvent -FilterHashtable @{ LogName = 'Application'; ProviderName = 'VPNMonitor' } -MaxEvents 50 -ErrorAction SilentlyContinue |
-        Format-List TimeCreated, LevelDisplayName, Message | Out-File (Join-Path $LogDir 'eventlog.txt')
-    Get-WinEvent -FilterHashtable @{ LogName = 'System'; ProviderName = 'Service Control Manager' } -MaxEvents 50 -ErrorAction SilentlyContinue |
-        Format-List TimeCreated, Message | Out-File (Join-Path $LogDir 'scm.txt')
+    $collect = [ordered]@{
+        'logs do serviço' = {
+            param($dir)
+            $logs = Join-Path $script:DataDir 'logs'
+            if (Test-Path $logs) { Copy-Item "$logs\*" $dir -Force -ErrorAction SilentlyContinue }
+        }
+        'eventlog.txt' = {
+            param($dir)
+            Get-WinEvent -FilterHashtable @{ LogName = 'Application'; ProviderName = 'VPNMonitor' } -MaxEvents 50 -ErrorAction SilentlyContinue |
+                Format-List TimeCreated, LevelDisplayName, Message | Out-File (Join-Path $dir 'eventlog.txt')
+        }
+        'scm.txt' = {
+            param($dir)
+            Get-WinEvent -FilterHashtable @{ LogName = 'System'; ProviderName = 'Service Control Manager' } -MaxEvents 50 -ErrorAction SilentlyContinue |
+                Format-List TimeCreated, Message | Out-File (Join-Path $dir 'scm.txt')
+        }
+        'status.json' = {
+            param($dir)
+            if (Test-Path $script:Svc) { & $script:Svc status --json 2>&1 | Out-File (Join-Path $dir 'status.json') }
+        }
+        'sc.txt' = {
+            param($dir)
+            $sc = (& sc.exe queryex VPNMonitor 2>&1 | Out-String) + (& sc.exe qc VPNMonitor 2>&1 | Out-String)
+            $sc | Out-File (Join-Path $dir 'sc.txt')
+        }
+    }
+    foreach ($item in $collect.GetEnumerator()) {
+        try { & $item.Value $LogDir }
+        catch { Write-Host "diagnóstico ($($item.Key)) falhou: $($_.Exception.Message)" }
+    }
 }

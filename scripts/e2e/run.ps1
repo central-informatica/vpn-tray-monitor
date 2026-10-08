@@ -71,9 +71,13 @@ try {
     Assert-That ($v.check.kind -eq 'ping' -and $v.check.host -eq '192.0.2.10') 'verificação ping 192.0.2.10'
     Assert-That ($v.intervalSeconds -eq 5) 'intervalo 5 s'
     Assert-EventSource
-    $started = Get-WinEvent -FilterHashtable @{ LogName = 'Application'; ProviderName = 'VPNMonitor' } -MaxEvents 20 |
-        Where-Object Message -Like '*iniciado*'
-    Assert-That ([bool]$started) 'Event Log: "VPN Monitor … iniciado" (origem registrada pelo MSI)'
+    $started = @(Get-WinEvent -FilterHashtable @{ LogName = 'Application'; ProviderName = 'VPNMonitor' } -MaxEvents 20 |
+            Where-Object Message -Like '*iniciado*')
+    Assert-That ($started.Count -gt 0) 'Event Log: "VPN Monitor … iniciado" (origem registrada pelo MSI)'
+    # Sem a DLL de mensagens certa, o Windows mostra "The description for Event
+    # ID … cannot be found" com o texto como inserção.
+    $broken = @($started | Where-Object Message -Like '*cannot be found*')
+    Assert-That ($broken.Count -eq 0) "Event Log: mensagem resolvida pela EventCreate.exe ($($started[0].Message))"
     $run = Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Run' -Name VPNMonitorTray
     Assert-That ($run.VPNMonitorTray -eq "`"$InstallDir\vpnmon-tray.exe`"") 'bandeja no HKLM Run'
     Assert-That (Test-Path "$env:ProgramData\Microsoft\Windows\Start Menu\Programs\VPN Monitor.lnk") 'atalho no menu Iniciar'
@@ -81,24 +85,36 @@ try {
     Write-Step '4. Reconectando → erro transitório → backoff crescente; segunda VPN (link)'
     $delays = @{}
     $sawReconnecting = $false
-    Wait-Until -TimeoutSeconds 300 -IntervalMs 1000 -Message 'três tentativas com erro transitório' -Condition {
-        $m = @((Get-VpnStatus).vpns | Where-Object name -EQ 'Matriz')[0]
+    $sawTransient = $false
+    Wait-Until -TimeoutSeconds 300 -IntervalMs 500 -Message 'três tentativas com erro transitório' -Condition {
+        $m = Get-VpnView -Name 'Matriz'
         if ($m.state -eq 'Reconectando') { $script:sawReconnecting = $true }
-        $next = if ($m.PSObject.Properties['nextAttemptUnix']) { $m.nextAttemptUnix } else { 0 }
+        $next = Get-NextAttemptUnix -View $m
         if ($m.attempt -gt 0 -and $next -gt 0 -and -not $delays.ContainsKey([int]$m.attempt)) {
             $delays[[int]$m.attempt] = $next - [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
             Write-Host "tentativa $($m.attempt): próxima em $($delays[[int]$m.attempt]) s ($($m.state))"
         }
         $err = if ($m.PSObject.Properties['lastError']) { $m.lastError } else { $null }
-        if ($err -and $err.class -ne 'transitorio') {
-            throw "erro não transitório: classe $($err.class), código $($err.code): $($err.message)"
+        if ($err) {
+            if ($err.class -ne 'transitorio') {
+                throw "erro não transitório: classe $($err.class), código $($err.code): $($err.message)"
+            }
+            $script:sawTransient = $true
         }
         $delays.Count -ge 3
     }
     Assert-That $sawReconnecting 'estado Reconectando observado'
+    Assert-That $sawTransient 'lastError de classe transitorio observado'
     $keys = @($delays.Keys | Sort-Object)
-    # Folga de 1 s: a espera é medida com resolução de segundo e jitter de ±20 %.
-    Assert-That ($delays[$keys[-1]] -ge $delays[$keys[0]] + 1) "backoff crescente ($(($keys | ForEach-Object { "$_=$($delays[$_])s" }) -join ', '))"
+    $d1, $d2, $d3 = $delays[$keys[0]], $delays[$keys[1]], $delays[$keys[2]]
+    $shown = ($keys | ForEach-Object { "$_=$($delays[$_])s" }) -join ', '
+    # Esperas nominais ~5/10/20 s (base = intervalo de 5 s, dobrando, jitter
+    # ±20 %). Cada uma é medida na 1ª sondagem que a vê (a cada 0,5 s, mais a
+    # chamada ao pipe) com resolução de segundo: a medida pode sair até ~2 s
+    # menor, daí a folga de 2 s nas comparações.
+    $tol = 2
+    Assert-That ($d1 -lt $d2 + $tol -and $d2 -lt $d3 + $tol) "backoff crescente d1 < d2 < d3 (folga $tol s; $shown)"
+    Assert-That ($d3 + $tol -ge 2 * $d1) "backoff ao menos dobra entre a 1ª e a 3ª espera (folga $tol s; $shown)"
     Invoke-Svc @('vpn', 'add', '--name', 'Link', '--entry', $LinkEntry, '--check', 'link') | Write-Host
     Wait-Until -TimeoutSeconds 15 -Message 'VPN Link (verificação link) aparece no status' -Condition {
         @((Get-VpnStatus).vpns | Where-Object { $_.name -eq 'Link' -and $_.checkKind -eq 'link' }).Count -eq 1
@@ -113,6 +129,27 @@ try {
     Assert-DataAcl
 
     Write-Step '6. Parada em até 10 s, com discagem em curso; nova partida'
+    # A discagem começa quando vence a espera (nextAttemptUnix = T) e, contra o
+    # TEST-NET, leva ~20 s até falhar (aí attempt sobe). Para pegar a discagem
+    # em curso, espera até T+2 s com attempt ainda igual (não falhou), e não
+    # passa de T+10 s (folga antes da falha). Se a tentativa falhar no meio,
+    # recomeça com a nova espera.
+    $script:dialAttempt = -1
+    $script:dialAt = [long]0
+    Wait-Until -TimeoutSeconds 240 -IntervalMs 500 -Message 'discagem em curso' -Condition {
+        $m = Get-VpnView -Name 'Matriz'
+        $next = Get-NextAttemptUnix -View $m
+        if ($m.attempt -ne $script:dialAttempt -or $next -ne $script:dialAt) {
+            $script:dialAttempt = $m.attempt
+            $script:dialAt = $next
+            Write-Host "tentativa $($m.attempt) arma a próxima discagem para $([DateTimeOffset]::FromUnixTimeSeconds($next).ToString('HH:mm:ss')) UTC ($($m.state))"
+            return $false
+        }
+        $now = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+        $inDial = $next -gt 0 -and $now -ge $next + 2 -and $now -le $next + 10
+        if ($inDial) { Write-Host "discagem em curso: $($now - $next) s após o início, attempt $($m.attempt), estado $($m.state)" }
+        $inDial
+    }
     $sw = [Diagnostics.Stopwatch]::StartNew()
     & sc.exe stop VPNMonitor | Out-Null
     Wait-Until -TimeoutSeconds 30 -IntervalMs 100 -Message 'serviço parado' -Condition {
@@ -142,6 +179,7 @@ try {
 
     Write-Step '7. Upgrade para 0.0.299 preservando config e credencial; downgrade bloqueado'
     $before = Get-DataHash
+    Assert-That ($before -match 'config\.json=' -and $before -match '\.bin=') "hash cobre config.json e o cofre ($before)"
     $code = Invoke-Msiexec -Mode '/i' -Msi $NewMsi -LogFile (Join-Path $LogDir 'upgrade-0.0.299.log')
     Assert-That ($code -in 0, 3010) "msiexec /i 0.0.299 (código $code)"
     $versions = Get-InstalledVersion
@@ -155,6 +193,10 @@ try {
     Assert-DataAcl
     $code = Invoke-Msiexec -Mode '/i' -Msi $OldMsi -LogFile (Join-Path $LogDir 'downgrade-0.0.199.log')
     Assert-That ($code -notin 0, 3010) "downgrade para 0.0.199 recusado (código $code)"
+    # Trecho ASCII do DowngradeErrorMessage do Product.wxs (o log do msiexec
+    # pode vir em ANSI e estragar os acentos).
+    $downgradeLog = Get-Content (Join-Path $LogDir 'downgrade-0.0.199.log') -Raw
+    Assert-That ($downgradeLog -match 'Desinstale-a antes de instalar esta') 'log do msiexec mostra a mensagem de downgrade do MSI'
     Assert-That (((Get-InstalledVersion) -join ',') -eq '0.0.299') 'continua 0.0.299'
 
     Write-Step '8. Desinstala preservando a ProgramData; reinstala; desinstala com PURGE=1'
