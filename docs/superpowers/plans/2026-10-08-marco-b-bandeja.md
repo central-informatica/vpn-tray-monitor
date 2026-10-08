@@ -22,6 +22,8 @@
 - Configurações: lista de VPNs; nome **somente leitura** para existentes (§5.2); Salvar envia `updateVpn`/`addVpn` com o objeto **completo**; erros de validação do serviço (`FieldError`) junto ao campo; recusa sem campos (ex.: "config.json foi alterado no disco…") no aviso geral; opções globais (avisos, nível de log).
 - Uma bandeja por sessão: mutex `Local\VPNMonitorTray`. O registro no `HKLM\…\Run` é do MSI (Marco C); a bandeja não se autoinstala.
 - Toda `MainWindow` da bandeja chama `SetExitOnClose(false)` (no walk, fechar uma `MainWindow` encerra o aplicativo).
+- A dica de credencial é sempre o comando completo que a CLI aceita: `vpnmon-svc credential set "<vpn>" --user <usuário>` (sem `--user` a
+  CLI recusa), numa linha própria, nunca truncada.
 - Textos ao usuário em português; commits convencionais em pt-BR; nenhum segredo no protocolo nem na interface (credenciais só pela CLI de administrador).
 
 ## Review Focus
@@ -29,9 +31,9 @@
 Entradas e condições que o spec implica, que nenhum teste "natural" das tarefas pegaria e que mais provavelmente atingiriam quem usa a bandeja — cada uma já tem teste na tarefa dona:
 
 1. **Fechar a janela de Configurações ou a de log** não pode encerrar a bandeja (no walk, fechar uma `MainWindow` chama `App().Exit` por padrão) — `TestEveryWindowKeepsTrayAlive` (Task 11).
-2. **Serviço mais novo que a bandeja** (atualização parcial) manda tipo de evento ou campo que esta versão não conhece: a bandeja segue funcionando, sem cair em laço de reconexão — `TestSessionConnectedThenSnapshotThenEvents` e `TestSessionIncompatible` (Task 4).
+2. **Serviço mais novo que a bandeja** (atualização parcial) manda tipo de evento ou campo que esta versão não conhece: a bandeja segue funcionando, sem cair em laço de reconexão, e conta o que deixou passar para "Sobre" — `TestSessionConnectedThenSnapshotThenEvents`, `TestSessionIncompatible` (Task 4) e `TestAbout` (Task 8).
 3. **Nome de VPN ou de entrada RAS com `&`, acentos, emoji ou longo demais**: o menu não vira atalho nem corta runa ao meio, e o tooltip não estoura as 127 unidades UTF-16 do Windows — `TestVPNItemLabels`, `TestVPNItemDetails`, `TestModelToolTip`, `TestAddEntries` (Tasks 7–8).
-4. **Trocar o tipo de verificação com porta ou host ainda preenchidos** (tcp → ping/link): Salvar não pode ser recusado por "só vale para tcp" — `TestFormDropsFieldsOfOtherKinds` (Task 10).
+4. **Bandeja aberta (login, reconexão) com o `config.json` já inválido**: o serviço só publica `configStatus` quando muda, então o aviso tem de vir no snapshot e não pode sumir ao reconectar — `TestSnapshotCarriesConfigStatus` (Task 1) e `TestModelConfigStatusFromSnapshot` (Task 8).
 5. **Bandeja sobe no login antes do serviço, ou o serviço é parado/atualizado com ela aberta**: ícone cinza com o motivo e volta sozinha, sem martelar o pipe (backoff até 10 s) — `TestClientServiceAbsent`, `TestClientReconnectsAfterServiceRestart`, `TestClientBackoffUpTo10s` (Task 5).
 
 ## Mapa de arquivos
@@ -63,6 +65,22 @@ Makefile (winres, cover-tray, build do tray), .github/workflows/ci.yml, .gitigno
 - **"Adicionar VPN"** usa o nome da entrada (sem espaços nas pontas, até 64 runas) e acrescenta " (2)", " (3)"… se já houver uma VPN com o nome (sem diferenciar maiúsculas).
 - **Reconectar ao serviço** esquece o `configStatus` ruim e a lista de entradas RAS (o serviço pode ter reiniciado com o arquivo corrigido); a lista RAS é pedida de novo a cada snapshot.
 - **A bandeja não grava log** (o usuário não tem pasta própria definida no spec); erros de pedidos aparecem em caixa de mensagem, erros fatais de partida em `MessageBox`.
+- **`configStatus` no snapshot** (`Snapshot.Config`): o serviço guarda o último estado da config (inclusive o arquivo inválido desde a
+  partida, via `MarkDiskInvalid`) e o manda a cada snapshot; a bandeja não o esquece ao reconectar se o snapshot não o trouxer.
+- **Aviso de credencial com `--user`**: o texto do `notice` do domínio (§4.8 dizia só `credential set "X"`) passa a
+  `rode vpnmon-svc credential set "X" --user <usuário>`, que é o que a CLI aceita; a bandeja mostra o mesmo comando, inteiro, numa linha
+  própria do submenu.
+- **Vários avisos de uma vez viram um balão só** ("3 VPNs caíram: A, B, C"; tipos misturados → uma linha por tipo), com o ícone do mais
+  grave: o Windows enfileiraria uma rajada de toasts.
+- **Contagem do que a decodificação tolerante deixou passar** (eventos descartados, mensagens com campos novos) mostrada em "Sobre", já
+  que a bandeja não grava log.
+- **Entre o `Connected` e o primeiro snapshot** a bandeja ainda mostra "Conectando…" (não "Nenhuma VPN configurada").
+- **`ERROR_ACCESS_DENIED` no `CreateMutex`** (mutex de uma bandeja elevada na mesma sessão) também conta como "já aberta".
+- **Troca de DPI percebida no tique de 1 s** (`ni.DPI()` mudou → ícones gerados de novo no tamanho certo): o `NotifyIcon` do walk não
+  expõe o `WM_DPICHANGED`.
+- **Configurações**: botões de salvar desabilitados até o `getConfig` responder; a janela só copia valores entre controles e o
+  view-model (`Form.Text/WithText`, `KindIndex`, `SelectIndex`…), e o "Desativar/Ativar" usa `VPNItem.ToggleCommand()`.
+- **Versão fora de tag**: o `git describe` já começa pelo commit, que então não se repete entre parênteses em "Sobre".
 - **Remover…** pede confirmação e lembra que a credencial fica no cofre (`vpnmon-svc credential clear`).
 
 ## Como verificar cada tarefa
@@ -85,7 +103,12 @@ e `make build` produzindo os dois exes, com o manifest conferido por `go-winres 
 - Modify: `internal/core/ipc/pipe_windows.go`
 - Modify: `internal/core/ipc/pipe_windows_test.go`
 - Modify: `internal/features/monitor/service/view.go`
+- Modify: `internal/features/monitor/service/orchestrator.go`
+- Modify: `internal/features/monitor/service/configops.go`
+- Modify: `internal/features/monitor/domain/state.go`
+- Modify: `internal/features/monitor/domain/decide_test.go`
 - Modify: `internal/features/monitor/service/orchestrator_test.go`
+- Modify: `internal/features/monitor/service/configops_test.go`
 - Create: `internal/features/monitor/service/view_test.go`
 
 **Interfaces:**
@@ -93,7 +116,9 @@ e `make build` produzindo os dois exes, com o manifest conferido por `go-winres 
 - Produces: `ipc.VPNView.BlockedUntilUnix int64` (`json:"blockedUntilUnix,omitempty"`); `var ipc.ErrNotService error` (o `ipc.Dial` do
   Windows devolve `fmt.Errorf("%w: …", ErrNotService, …)`); constantes `ipc.StateDesconhecido`, `StateConectada`, `StateDegradada`,
   `StateReconectando`, `StateDesconectada`, `StateCredencialInvalida`, `StateErroConfig`, `StatePausada`, `StateSemRede`, `StateDesativada`,
-  `ipc.ClassTransitorio`, `ClassCredencial`, `ClassConfiguracao`.
+  `ipc.ClassTransitorio`, `ClassCredencial`, `ClassConfiguracao`; `ipc.Snapshot.Config *ipc.ConfigStatus` (`json:"config,omitempty"`), que o
+  serviço preenche em todo snapshot com o último `configStatus` (inclusive o `config.json` inválido desde a partida); o aviso de credencial
+  rejeitada passa a dizer `rode vpnmon-svc credential set "<vpn>" --user <usuário>` (a CLI exige `--user`).
 
 - [ ] **Step 1: Escrever o teste que falha**
 
@@ -183,6 +208,48 @@ func TestStartupRejectionViewCarriesBlockedUntil(t *testing.T) {
 }
 ```
 
+Acrescentar ao fim de `internal/features/monitor/service/configops_test.go` (usa `newOrch`, `stubWorld`, `h.paths`; `errors`, `os` e `strings` já são importados):
+
+```go
+// O estado do config.json vai em todo snapshot: uma bandeja que se inscreve
+// depois do configStatus ruim (ou com o arquivo inválido desde a partida)
+// também mostra o aviso; a recarga válida limpa.
+func TestSnapshotCarriesConfigStatus(t *testing.T) {
+	w := &stubWorld{up: true, network: true}
+	h := newOrch(t, w, cfgWith(vpnNamed("Matriz")), config.State{})
+	h.waitView("Matriz", domain.Conectada)
+	if c := h.o.Status().Config; c == nil || !c.OK {
+		t.Fatalf("partida válida: %+v", c)
+	}
+	h.o.MarkDiskInvalid(errors.New("JSON inválido: unexpected EOF")) // como a montagem faz na partida
+	if c := h.o.Status().Config; c == nil || c.OK || !strings.Contains(c.Message, "unexpected EOF") {
+		t.Fatalf("inválido na partida: %+v", c)
+	}
+	_ = os.WriteFile(h.paths.ConfigFile, []byte(`{"version":2,"vpns":[{"name":"Matriz","rasEntry":"VPN Matriz","check":{"kind":"ping"}}]}`), 0o600)
+	h.o.ReloadFromDisk()
+	events, cancel := h.o.Subscribe()
+	defer cancel()
+	var snap ipc.Snapshot
+	if err := ipc.DecodePayload((<-events).Payload, &snap); err != nil {
+		t.Fatal(err)
+	}
+	if c := snap.Config; c == nil || c.OK || len(c.Fields) == 0 || c.Fields[0].Field != "vpns[0].check.host" {
+		t.Fatalf("snapshot de quem se inscreve depois: %+v", c)
+	}
+	_ = os.WriteFile(h.paths.ConfigFile, []byte(`{"version":2,"vpns":[{"name":"Matriz","rasEntry":"VPN Matriz","check":{"kind":"link"}}]}`), 0o600)
+	h.o.ReloadFromDisk()
+	if c := h.o.Status().Config; c == nil || !c.OK {
+		t.Fatalf("depois de corrigir: %+v", c)
+	}
+}
+```
+
+Em `internal/features/monitor/domain/decide_test.go` (`TestDialResults`), o texto esperado do aviso passa a ter o `--user`:
+
+```go
+	if k := noticeKinds(d); len(k) != 1 || k[0] != NoticeCredential || d.Notices[0].Text != "VPN Matriz: credencial rejeitada — rode vpnmon-svc credential set \"Matriz\" --user <usuário>" {
+```
+
 Em `internal/core/ipc/pipe_windows_test.go`, `TestWindowsPipePIDCheck` passa a exigir o erro sentinela (só roda no job Windows):
 
 ```go
@@ -194,7 +261,7 @@ Em `internal/core/ipc/pipe_windows_test.go`, `TestWindowsPipePIDCheck` passa a e
 
 - [ ] **Step 2: Rodar o teste e ver falhar**
 
-Run: `go test ./internal/features/monitor/service/ -run "TestToViewBlockedUntil|TestStateNamesMatchProtocol|TestStartupRejectionViewCarriesBlockedUntil"`
+Run: `go test ./internal/features/monitor/... -run "TestToViewBlockedUntil|TestStateNamesMatchProtocol|TestStartupRejectionViewCarriesBlockedUntil|TestSnapshotCarriesConfigStatus|TestDialResults"`
 Expected: FAIL — build failed: `v.BlockedUntilUnix undefined (type ipc.VPNView has no field or method BlockedUntilUnix)`, `undefined: ipc.StateDesconhecido`
 
 - [ ] **Step 3: Implementar**
@@ -260,9 +327,88 @@ Em `internal/features/monitor/service/view.go` (`ToView`), depois do bloco de `N
 `BlockedUntil` só é preenchido pela memória vinda do `state.json` (`rejectionMemory`) e zera quando a credencial muda ou a janela vence;
 uma rejeição ao vivo continua com `LastError` (691…) e sem prazo.
 
+Em `internal/core/ipc/protocol.go`, `Snapshot` ganha o estado da config:
+
+```go
+	Snapshot struct {
+		VPNs          []VPNView `json:"vpns"`
+		Notifications bool      `json:"notifications"`
+		// Config é o estado atual do config.json: quem se inscreve depois de
+		// um configStatus ruim fica sabendo pelo snapshot.
+		Config *ConfigStatus `json:"config,omitempty"`
+	}
+```
+
+Em `internal/features/monitor/service/orchestrator.go`: no struct `Orchestrator`, depois de `cfg        config.Config`,
+
+```go
+	// cfgStatus é o último configStatus publicado; vai em todo snapshot.
+	cfgStatus ipc.ConfigStatus
+```
+
+em `New`, o literal termina com `removed: map[string]removedCred{}, cfgStatus: ipc.ConfigStatus{OK: true}}`, e `snapshotLocked` começa com
+
+```go
+	cs := o.cfgStatus
+	snap := ipc.Snapshot{VPNs: []ipc.VPNView{}, Notifications: o.cfg.Notifications, Config: &cs}
+```
+
+Em `internal/features/monitor/service/configops.go`, `MarkDiskInvalid` passa a guardar o motivo e ganha dois ajudantes:
+
+```go
+// MarkDiskInvalid registra que o config.json em disco está inválido (na
+// partida, pela montagem; depois, pela recarga). Mudanças pelo pipe ficam
+// recusadas até uma recarga válida.
+//
+// O motivo passa a ir no snapshot (Snapshot.Config): uma bandeja que se
+// inscreve depois, inclusive com o arquivo já inválido na partida, o vê.
+func (o *Orchestrator) MarkDiskInvalid(err error) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.diskInvalid = err
+	o.cfgStatus = invalidStatus(err)
+}
+
+// invalidStatus é o configStatus de um config.json inválido, com os
+// problemas por campo quando a validação os aponta.
+func invalidStatus(err error) ipc.ConfigStatus {
+	st := ipc.ConfigStatus{OK: false, Message: err.Error()}
+	var ve *config.ValidationError
+	if errors.As(err, &ve) {
+		st.Fields = ve.Problems
+	}
+	return st
+}
+
+// publishConfigStatus guarda o estado da config (vai em todo snapshot) e o
+// publica, sob o mesmo lock do snapshot: quem se inscreve não perde a troca.
+func (o *Orchestrator) publishConfigStatus(st ipc.ConfigStatus) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.cfgStatus = st
+	o.bus.publish(ipc.MustMessage("", ipc.TypeConfigStatus, st))
+}
+```
+
+e as cinco publicações de `configStatus` do arquivo passam por ele:
+
+- em `mutate` e nos dois `OK` de `ReloadFromDisk`: `o.publishConfigStatus(ipc.ConfigStatus{OK: true})` no lugar de
+  `o.bus.publish(ipc.MustMessage("", ipc.TypeConfigStatus, ipc.ConfigStatus{OK: true}))`;
+- no ramo de `config.Parse` com erro em `ReloadFromDisk`, as seis linhas que montavam `st` (com `Fields`) e publicavam viram
+  `o.publishConfigStatus(invalidStatus(err))` (o `MarkDiskInvalid(err)` logo antes continua);
+- em `ConfigUnreadable`: `o.publishConfigStatus(ipc.ConfigStatus{OK: false, Message: msg})`.
+
+Em `internal/features/monitor/domain/state.go`, `noticeCredential` (a CLI recusa `credential set` sem `--user`):
+
+```go
+func noticeCredential(name string) Notice {
+	return Notice{NoticeCredential, fmt.Sprintf("VPN %s: credencial rejeitada — rode vpnmon-svc credential set \"%s\" --user <usuário>", name, name)}
+}
+```
+
 - [ ] **Step 4: Rodar os testes e ver passar**
 
-Run: `go test -race ./internal/features/monitor/service/ ./internal/core/ipc/`
+Run: `go test -race ./internal/features/monitor/... ./internal/core/ipc/`
 Expected: PASS
 
 - [ ] **Step 5: Formatação e vet (linux e windows)**
@@ -274,7 +420,7 @@ Expected: nenhuma saída de erro (gofmt sem arquivos listados)
 
 ```bash
 git add internal/core/ipc internal/features/monitor/service
-git commit -m "feat(ipc): prazo do bloqueio de credencial, ErrNotService e nomes de estado no protocolo"
+git commit -m "feat(ipc): prazo do bloqueio de credencial, estado da config no snapshot, ErrNotService e nomes de estado"
 ```
 
 ---
@@ -494,8 +640,9 @@ git commit -m "feat(assets): ícones da bandeja embutidos e leitor de .ico"
 **Interfaces:**
 - Consumes: `platform.ErrNotSupported`.
 - Produces: `instance.TrayMutex` (= `Local\VPNMonitorTray`), `var instance.ErrAlreadyRunning error`,
-  `instance.Acquire(name string) (release func(), err error)` — no Windows, `CreateMutex`; já existente → `ErrAlreadyRunning`; `release`
-  idempotente. Fora do Windows devolve `platform.ErrNotSupported`.
+  `instance.Acquire(name string) (release func(), err error)` — no Windows, `CreateMutex`; já existente **ou acesso negado** (mutex de uma
+  bandeja elevada na mesma sessão) → `ErrAlreadyRunning`; `release` idempotente. Fora do Windows devolve `platform.ErrNotSupported`.
+  (Interno, testado no Linux) `classify(err, exists, denied error) error`.
 
 - [ ] **Step 1: Escrever o teste que falha**
 
@@ -506,6 +653,7 @@ package instance
 
 import (
 	"errors"
+	"fmt"
 	"runtime"
 	"testing"
 
@@ -524,6 +672,24 @@ func TestAcquireOutsideWindows(t *testing.T) {
 	}
 	if _, err := Acquire(TrayMutex); !errors.Is(err, platform.ErrNotSupported) {
 		t.Fatalf("esperava ErrNotSupported: %v", err)
+	}
+}
+
+// Já existe, ou acesso negado (mutex criado por uma bandeja elevada na mesma
+// sessão, cuja DACL não deixa esta abri-lo): as duas são "já aberta".
+func TestClassify(t *testing.T) {
+	exists, denied, other := errors.New("existe"), errors.New("negado"), errors.New("outro")
+	if !errors.Is(classify(exists, exists, denied), ErrAlreadyRunning) {
+		t.Fatal("já existe")
+	}
+	if !errors.Is(classify(fmt.Errorf("x: %w", denied), exists, denied), ErrAlreadyRunning) {
+		t.Fatal("acesso negado")
+	}
+	if got := classify(other, exists, denied); got != other {
+		t.Fatalf("outro erro: %v", got)
+	}
+	if classify(nil, exists, denied) != nil {
+		t.Fatal("nil")
 	}
 }
 ```
@@ -585,6 +751,16 @@ const TrayMutex = `Local\VPNMonitorTray`
 
 // ErrAlreadyRunning: outra instância já detém a trava nesta sessão.
 var ErrAlreadyRunning = errors.New("o VPN Monitor já está aberto nesta sessão")
+
+// classify traduz o erro de criar o mutex: "já existe" e "acesso negado"
+// (o mutex foi criado por uma bandeja elevada na mesma sessão, e a DACL dele
+// não deixa este processo abri-lo) significam que outra instância o detém.
+func classify(err, exists, denied error) error {
+	if err != nil && (errors.Is(err, exists) || errors.Is(err, denied)) {
+		return ErrAlreadyRunning
+	}
+	return err
+}
 ```
 
 `internal/core/platform/instance/instance_other.go`:
@@ -615,7 +791,8 @@ import (
 	"golang.org/x/sys/windows"
 )
 
-// Acquire cria o mutex nomeado; se ele já existir, outra instância o detém e
+// Acquire cria o mutex nomeado; se ele já existir (ou for de uma instância
+// elevada, acesso negado), outra instância o detém e
 // devolve ErrAlreadyRunning. release fecha o handle (idempotente); o Windows
 // também o fecha quando o processo termina.
 func Acquire(name string) (release func(), err error) {
@@ -624,7 +801,7 @@ func Acquire(name string) (release func(), err error) {
 		return nil, err
 	}
 	h, err := windows.CreateMutex(nil, false, p)
-	if errors.Is(err, windows.ERROR_ALREADY_EXISTS) {
+	if errors.Is(classify(err, windows.ERROR_ALREADY_EXISTS, windows.ERROR_ACCESS_DENIED), ErrAlreadyRunning) {
 		if h != 0 {
 			windows.CloseHandle(h)
 		}
@@ -677,8 +854,10 @@ git commit -m "feat(platform): trava de instância única por sessão (mutex nom
   - `type EventKind int` com `EvConn`, `EvSnapshot`, `EvVPNState`, `EvNotice`, `EvConfigStatus`.
   - `type Event struct{ Kind EventKind; Conn Conn; Snapshot ipc.Snapshot; VPN ipc.VPNView; Notice ipc.NoticeEvent; ConfigStatus ipc.ConfigStatus }`.
   - `var ErrNotConnected error`.
-  - (interno) `openSession(conn net.Conn, appVersion string, timeout time.Duration, emit func(Event) bool, ready func(*session)) (*session, error)`;
-    `(*session).call(ctx, typ string, payload, out any) error`, `close()`, `done() <-chan struct{}`, `stopping() bool`.
+  - `type Stats struct{ DroppedEvents, UnknownFields int64 }` (o que a decodificação tolerante descartou ou aproveitou sem campos novos).
+  - (interno) `type counters struct{ events, fields atomic.Int64 }` com `stats() Stats`;
+    `openSession(conn net.Conn, appVersion string, timeout time.Duration, emit func(Event) bool, ready func(*session), cnt *counters) (*session, error)`;
+    `(*session).call(ctx, typ string, payload, out any) error`, `close()`, `done() <-chan struct{}`, `stopping() bool`, `decode(raw, out) error`.
   - Nos testes: `fakeBackend`/`newBackend()`, `startServer(t, b) *server` (`addr`, `stop()`), `dialTCP(addr)`, `next(t, ch)` e
     `fakeHelloServer(t, reply)` — reaproveitados pela Task 5.
 
@@ -812,7 +991,7 @@ func openTest(t *testing.T, addr string) (*session, chan Event) {
 		t.Fatal(err)
 	}
 	events := make(chan Event, 16)
-	s, err := openSession(conn, "2.1.0-tray", time.Second, func(ev Event) bool { events <- ev; return true }, func(*session) {})
+	s, err := openSession(conn, "2.1.0-tray", time.Second, func(ev Event) bool { events <- ev; return true }, func(*session) {}, &counters{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -823,7 +1002,7 @@ func openTest(t *testing.T, addr string) (*session, chan Event) {
 func TestSessionConnectedThenSnapshotThenEvents(t *testing.T) {
 	b := newBackend()
 	srv := startServer(t, b)
-	_, events := openTest(t, srv.addr)
+	s, events := openTest(t, srv.addr)
 	if ev := next(t, events); ev.Kind != EvConn || ev.Conn.State != Connected || ev.Conn.ServerVersion != "2.1.0-svc" {
 		t.Fatalf("1º evento: %+v", ev)
 	}
@@ -847,6 +1026,10 @@ func TestSessionConnectedThenSnapshotThenEvents(t *testing.T) {
 	}
 	if ev := next(t, events); ev.Kind != EvVPNState || ev.VPN.Name != "Filial" || ev.VPN.State != "Conectada" {
 		t.Fatalf("vpnState com campo novo: %+v", ev)
+	}
+	// Nada vai a log em disco: as contagens aparecem em "Sobre".
+	if got := s.cnt.stats(); got != (Stats{DroppedEvents: 1, UnknownFields: 1}) {
+		t.Fatalf("contagens: %+v", got)
 	}
 }
 
@@ -978,7 +1161,7 @@ func TestSessionIncompatible(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			_, err = openSession(conn, "2.1.0-tray", time.Second, func(Event) bool { return true }, func(*session) {})
+			_, err = openSession(conn, "2.1.0-tray", time.Second, func(Event) bool { return true }, func(*session) {}, &counters{})
 			var e *ipc.Error
 			if !errors.As(err, &e) || e.Code != ipc.CodeIncompatible || !strings.Contains(e.Message, "atualize") {
 				t.Fatalf("esperava incompatible: %v", err)
@@ -995,7 +1178,7 @@ func TestSessionBusy(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = openSession(conn, "x", time.Second, func(Event) bool { return true }, func(*session) {})
+	_, err = openSession(conn, "x", time.Second, func(Event) bool { return true }, func(*session) {}, &counters{})
 	var e *ipc.Error
 	if !errors.As(err, &e) || e.Code != ipc.CodeBusy {
 		t.Fatalf("esperava busy: %v", err)
@@ -1020,6 +1203,7 @@ package client
 
 import (
 	"errors"
+	"sync/atomic"
 
 	"github.com/guibsu/vpn-tray-monitor/internal/core/ipc"
 )
@@ -1090,6 +1274,21 @@ type Event struct {
 
 // ErrNotConnected: não há conexão com o serviço para enviar o pedido.
 var ErrNotConnected = errors.New("sem conexão com o serviço VPN Monitor")
+
+// Stats conta o que a decodificação tolerante deixou passar (serviço mais
+// novo que a bandeja): eventos de tipo desconhecido ou ilegíveis, que são
+// descartados, e mensagens com campos que esta bandeja não conhece, que são
+// aproveitadas sem eles. Aparece em "Sobre" (a bandeja não grava log).
+type Stats struct {
+	DroppedEvents int64
+	UnknownFields int64
+}
+
+type counters struct{ events, fields atomic.Int64 }
+
+func (c *counters) stats() Stats {
+	return Stats{DroppedEvents: c.events.Load(), UnknownFields: c.fields.Load()}
+}
 ```
 
 `internal/features/tray/client/session.go`:
@@ -1115,6 +1314,7 @@ type session struct {
 	conn  net.Conn
 	codec *ipc.Codec
 	emit  func(Event) bool
+	cnt   *counters
 	// writeTimeout limita cada escrita (servidor travado não prende o menu).
 	writeTimeout time.Duration
 
@@ -1129,10 +1329,10 @@ type session struct {
 
 // openSession troca o hello (prazo timeout), chama ready (quem chama passa
 // a aceitar pedidos por esta sessão), emite Conn{Connected}, liga o leitor e
-// se inscreve nos eventos. Erros do serviço chegam como *ipc.Error
+// se inscreve nos eventos. cnt recebe as contagens da decodificação tolerante. Erros do serviço chegam como *ipc.Error
 // (incompatible, busy…); a conexão é fechada em qualquer erro.
-func openSession(conn net.Conn, appVersion string, timeout time.Duration, emit func(Event) bool, ready func(*session)) (*session, error) {
-	s := &session{conn: conn, codec: ipc.NewCodec(conn), emit: emit, writeTimeout: timeout,
+func openSession(conn net.Conn, appVersion string, timeout time.Duration, emit func(Event) bool, ready func(*session), cnt *counters) (*session, error) {
+	s := &session{conn: conn, codec: ipc.NewCodec(conn), emit: emit, cnt: cnt, writeTimeout: timeout,
 		pending: map[string]chan ipc.Message{}, finished: make(chan struct{})}
 	serverApp, err := s.hello(appVersion, timeout)
 	if err != nil {
@@ -1175,7 +1375,7 @@ func (s *session) hello(appVersion string, timeout time.Duration) (string, error
 		return "", fmt.Errorf("resposta inesperada ao hello: %q", m.Type)
 	}
 	var h ipc.Hello
-	if err := json.Unmarshal(m.Payload, &h); err != nil {
+	if err := s.decode(m.Payload, &h); err != nil {
 		return "", fmt.Errorf("hello ilegível: %w", err)
 	}
 	if h.Protocol != ipc.ProtocolVersion {
@@ -1240,13 +1440,28 @@ func (s *session) event(m ipc.Message) (Event, bool) {
 		s.mu.Unlock()
 		return Event{Kind: EvConn, Conn: Conn{State: Stopping, Message: "o serviço VPN Monitor está parando"}}, true
 	default:
+		s.cnt.events.Add(1)
 		return Event{}, false
 	}
-	// Tolerante: campos novos de um serviço mais novo não derrubam a bandeja.
-	if len(m.Payload) > 0 && json.Unmarshal(m.Payload, target) != nil {
+	if s.decode(m.Payload, target) != nil {
+		s.cnt.events.Add(1)
 		return Event{}, false
 	}
 	return ev, true
+}
+
+// decode é tolerante: tenta o estrito do protocolo e, se só sobrarem campos
+// desconhecidos (serviço mais novo), aproveita a mensagem sem eles e conta.
+// Erro só se nem a leitura tolerante der certo.
+func (s *session) decode(raw json.RawMessage, out any) error {
+	if len(raw) == 0 || ipc.DecodePayload(raw, out) == nil {
+		return nil
+	}
+	if err := json.Unmarshal(raw, out); err != nil {
+		return err
+	}
+	s.cnt.fields.Add(1)
+	return nil
 }
 
 // call envia um pedido e espera a resposta com o mesmo id.
@@ -1325,8 +1540,10 @@ func (s *session) stopping() bool {
 ```
 
 Pontos que os testes fixam: o `Conn{Connected}` é emitido **antes** do snapshot (o `ready` corre antes dele, para um clique logo
-após conectar já ter sessão); a resposta ao hello e os eventos são lidos de forma **tolerante** (`json.Unmarshal`, não estrito); tipo de
-evento desconhecido é ignorado; erro de nível de conexão (`busy`, sem id) no hello volta como `*ipc.Error`.
+após conectar já ter sessão); a resposta ao hello e os eventos são lidos de forma **tolerante** — estrito primeiro e, se só sobrarem campos
+desconhecidos, sem eles, contando em `UnknownFields`; tipo de evento desconhecido ou payload ilegível é descartado e contado em
+`DroppedEvents` (as contagens vão para "Sobre"; a bandeja não grava log); erro de nível de conexão (`busy`, sem id) no hello volta como
+`*ipc.Error`.
 
 - [ ] **Step 4: Rodar os testes e ver passar**
 
@@ -1360,7 +1577,8 @@ git commit -m "feat(tray): sessão do cliente do pipe (hello, inscrição, event
     After func(time.Duration) <-chan time.Time; Rand func() float64; EventBuffer int }` (padrões: 5 s; 500 ms→10 s ±20 %; `time.After`;
     `rand.Float64`; 64).
   - `New(o Options) *Client`; `(*Client).Run(ctx)` (fecha `Events()` ao voltar); `(*Client).Events() <-chan Event`;
-    `(*Client).Call(ctx, typ string, payload, out any) error` (`ErrNotConnected` sem sessão; erro do serviço como `*ipc.Error`).
+    `(*Client).Call(ctx, typ string, payload, out any) error` (`ErrNotConnected` sem sessão; erro do serviço como `*ipc.Error`);
+    `(*Client).Stats() Stats`.
 
 - [ ] **Step 1: Escrever o teste que falha**
 
@@ -1444,6 +1662,9 @@ func TestClientConnectsAndCalls(t *testing.T) {
 	var snap ipc.Snapshot
 	if err := c.Call(context.Background(), ipc.TypeStatus, nil, &snap); err != nil || snap.VPNs[0].Name != "Matriz" {
 		t.Fatalf("status: %+v %v", snap, err)
+	}
+	if got := c.Stats(); got != (Stats{}) {
+		t.Fatalf("nada descartado com serviço da mesma versão: %+v", got)
 	}
 }
 
@@ -1539,8 +1760,11 @@ func TestClientServiceAbsent(t *testing.T) {
 	dead := ln.Addr().String()
 	ln.Close()
 	c := runClient(t, fastOptions(dialTCP(dead)))
-	if cn := waitConn(t, c.Events(), Unavailable); cn.Message == "" {
-		t.Fatalf("sem motivo: %+v", cn)
+	// O motivo é o erro do Dial como veio (o ipc.Dial já diz "serviço VPN
+	// Monitor inacessível: …"); a bandeja não repete o prefixo.
+	if cn := waitConn(t, c.Events(), Unavailable); !strings.Contains(cn.Message, dead) ||
+		strings.Contains(cn.Message, "inacessível") {
+		t.Fatalf("motivo: %+v", cn)
 	}
 }
 
@@ -1641,6 +1865,7 @@ type Options struct {
 type Client struct {
 	o      Options
 	events chan Event
+	cnt    counters
 	mu     sync.Mutex
 	cur    *session
 }
@@ -1713,9 +1938,10 @@ func (c *Client) connectOnce(ctx context.Context, emit func(Event) bool) (Conn, 
 		if errors.Is(err, ipc.ErrNotService) {
 			return Conn{State: NotService, Message: err.Error()}, 0
 		}
-		return Conn{State: Unavailable, Message: "serviço VPN Monitor inacessível: " + err.Error()}, 0
+		// ipc.Dial já explica ("serviço VPN Monitor inacessível: …").
+		return Conn{State: Unavailable, Message: err.Error()}, 0
 	}
-	s, err := openSession(conn, c.o.AppVersion, c.o.Timeout, emit, c.setCurrent)
+	s, err := openSession(conn, c.o.AppVersion, c.o.Timeout, emit, c.setCurrent, &c.cnt)
 	if err != nil {
 		c.setCurrent(nil)
 		var e *ipc.Error
@@ -1755,10 +1981,13 @@ func (c *Client) Call(ctx context.Context, typ string, payload any, out any) err
 	}
 	return s.call(ctx, typ, payload, out)
 }
+
+// Stats devolve as contagens da decodificação tolerante desde o início.
+func (c *Client) Stats() Stats { return c.cnt.stats() }
 ```
 
-Estados informados: falha do `Dial` → `Unavailable` ("serviço VPN Monitor inacessível: …") ou `NotService` se `errors.Is(err,
-ipc.ErrNotService)`; `incompatible` no hello → `Incompatible` com a mensagem do serviço; queda depois de `serviceStopping` →
+Estados informados: falha do `Dial` → `Unavailable` com o erro como veio (o `ipc.Dial` já diz "serviço VPN Monitor inacessível: …"; a
+bandeja não repete o prefixo) ou `NotService` se `errors.Is(err, ipc.ErrNotService)`; `incompatible` no hello → `Incompatible` com a mensagem do serviço; queda depois de `serviceStopping` →
 `Unavailable` "o serviço VPN Monitor parou"; queda sem aviso → `Unavailable` "conexão com o serviço VPN Monitor perdida". Esperado na
 cobertura: ≥ 85 %.
 
@@ -2013,7 +2242,7 @@ git commit -m "feat(tray): textos do view-model (durações, horários, truncame
 - Produces: `type Icon int` com `IconGray`, `IconGreen`, `IconAmber`, `IconRed` e `String()`; `type VPNItem struct{ Name, Label string;
   Details []string; CanCheck, CanReconnect, CanPause, CanResume, Enabled bool; ToggleLabel string }`; `MenuEscape(s string) string`;
   (internos) `vpnItem(v ipc.VPNView, now time.Time) VPNItem`, `shortState(v, now) string`, `severity(state string) Icon`,
-  `inactive(state string) bool`, `maxDetail = 96`. Nos testes: `brt`, `now`, `ago(d)`, `ahead(d)` (usados pelas Tasks 8–10).
+  `inactive(state string) bool`, `maxDetail = 96`; `CredentialCommand(vpn string) string` (`vpnmon-svc credential set "<vpn>" --user <usuário>`). Nos testes: `brt`, `now`, `ago(d)`, `ahead(d)` (usados pelas Tasks 8–10).
 
 - [ ] **Step 1: Escrever o teste que falha**
 
@@ -2099,12 +2328,12 @@ func TestVPNItemDetails(t *testing.T) {
 		{"credencial ao vivo", ipc.VPNView{Name: "Matriz", State: ipc.StateCredencialInvalida, SinceUnix: ago(5 * time.Minute),
 			LastError: &ipc.ErrorInfo{Class: ipc.ClassCredencial, Code: 691, Message: "usuário ou senha inválidos"}},
 			[]string{"Credencial rejeitada há 5 min", "Último erro: usuário ou senha inválidos (erro 691)",
-				`Corrija como administrador: vpnmon-svc credential set "Matriz"`}},
+				"Corrija como administrador:", `vpnmon-svc credential set "Matriz" --user <usuário>`}},
 		// Pendência do Marco A: restaurada do state.json, sem LastError.
 		{"credencial restaurada", ipc.VPNView{Name: "Matriz", State: ipc.StateCredencialInvalida, SinceUnix: ago(time.Minute),
 			BlockedUntilUnix: time.Date(2026, 10, 8, 14, 10, 0, 0, brt).Unix()},
 			[]string{"Credencial rejeitada há 1 min", "Rejeitada antes do reinício do serviço; nova tentativa às 14:10",
-				`Corrija como administrador: vpnmon-svc credential set "Matriz"`}},
+				"Corrija como administrador:", `vpnmon-svc credential set "Matriz" --user <usuário>`}},
 		{"erro config", ipc.VPNView{Name: "M", State: ipc.StateErroConfig, SinceUnix: ago(time.Hour),
 			LastError: &ipc.ErrorInfo{Class: ipc.ClassConfiguracao, Code: 623, Message: `a entrada RAS "X" não existe`}},
 			[]string{"Erro de configuração há 1 h", `Último erro: a entrada RAS "X" não existe (erro 623)`}},
@@ -2113,7 +2342,7 @@ func TestVPNItemDetails(t *testing.T) {
 		{"desativada", ipc.VPNView{Name: "M", State: ipc.StateDesativada, Reconnects24h: 3,
 			LastError: &ipc.ErrorInfo{Message: "antigo"}}, []string{"Desativada"}},
 		{"& nos detalhes", ipc.VPNView{Name: "P&D", State: ipc.StateCredencialInvalida},
-			[]string{"Credencial rejeitada", `Corrija como administrador: vpnmon-svc credential set "P&&D"`}},
+			[]string{"Credencial rejeitada", "Corrija como administrador:", `vpnmon-svc credential set "P&&D" --user <usuário>`}},
 	}
 	for _, c := range cases {
 		got := vpnItem(c.v, now).Details
@@ -2129,6 +2358,12 @@ func TestVPNItemDetailTruncated(t *testing.T) {
 		if n := len([]rune(l)); n > maxDetail {
 			t.Fatalf("linha com %d runas", n)
 		}
+	}
+	// O comando da credencial nunca é cortado, mesmo com o nome de 64 runas.
+	long := strings.Repeat("ç", 64)
+	d := vpnItem(ipc.VPNView{Name: long, State: ipc.StateCredencialInvalida}, now).Details
+	if last := d[len(d)-1]; last != CredentialCommand(long) || strings.Contains(last, "…") {
+		t.Fatalf("comando cortado: %q", last)
 	}
 }
 
@@ -2407,13 +2642,21 @@ func details(v ipc.VPNView, now time.Time) []string {
 		// só o fim da janela de 15 min (§4.7, §5.5).
 		lines = append(lines, "Rejeitada antes do reinício do serviço; nova tentativa às "+ClockTime(v.BlockedUntilUnix, now))
 	}
-	if v.State == ipc.StateCredencialInvalida {
-		lines = append(lines, fmt.Sprintf(`Corrija como administrador: vpnmon-svc credential set "%s"`, v.Name))
-	}
 	for i, l := range lines {
 		lines[i] = MenuEscape(Truncate(l, maxDetail))
 	}
+	if v.State == ipc.StateCredencialInvalida {
+		// O comando vai inteiro numa linha própria (nunca truncado): é para
+		// ser digitado. A CLI exige --user (§5.4).
+		lines = append(lines, "Corrija como administrador:",
+			MenuEscape(CredentialCommand(v.Name)))
+	}
 	return lines
+}
+
+// CredentialCommand é o comando que grava a credencial de uma VPN.
+func CredentialCommand(vpn string) string {
+	return fmt.Sprintf(`vpnmon-svc credential set "%s" --user <usuário>`, vpn)
 }
 
 // vpnItem monta o submenu de uma VPN.
@@ -2442,8 +2685,9 @@ func vpnItem(v ipc.VPNView, now time.Time) VPNItem {
 ```
 
 Aqui se cumprem as duas pendências do Marco A que tocam a bandeja: `CredencialInvalida` sem `LastError` e com `BlockedUntilUnix`
-mostra "Rejeitada antes do reinício do serviço; nova tentativa às HH:MM", e toda credencial rejeitada mostra
-`Corrija como administrador: vpnmon-svc credential set "<vpn>"`.
+mostra "Rejeitada antes do reinício do serviço; nova tentativa às HH:MM", e toda credencial rejeitada termina com duas linhas,
+"Corrija como administrador:" e `vpnmon-svc credential set "<vpn>" --user <usuário>` — o comando numa linha própria e **nunca truncado**
+(a CLI exige `--user`; ver `cmd/vpnmon-svc/cli.go`, `credential set`).
 
 - [ ] **Step 4: Rodar os testes e ver passar**
 
@@ -2475,8 +2719,10 @@ git commit -m "feat(tray): submenu por VPN no view-model (rótulos, detalhes, a�
   `client.Event`, `client.Conn`, `client.ConnState` (Tasks 4–5).
 - Produces: `type BalloonKind int` (`BalloonInfo`, `BalloonWarning`, `BalloonError`); `type Balloon struct{ Title, Text string; Kind BalloonKind }`;
   `type AddEntry struct{ Entry, Label string }`; `type Model struct{ Icon Icon; ToolTip, Header, Notice string; Connected bool; VPNs []VPNItem;
-  AddEntries []AddEntry; AddNote string }`; `New(appVersion string) *VM`; `(*VM).Apply(client.Event)`; `(*VM).Model(now time.Time) Model`;
-  `(*VM).TakeBalloons() []Balloon`; `(*VM).SetRasEntries([]ipc.RasEntry)`; `(*VM).Names() []string`; `(*VM).About() string`.
+  AddEntries []AddEntry; AddNote string }`; `New(appVersion string) *VM`; `(*VM).Apply(client.Event)`; `(*VM).Model(now time.Time) Model`
+  (antes do primeiro snapshot de cada conexão, ainda "Conectando…"); `(*VM).TakeBalloon() (Balloon, bool)` (vários avisos pendentes viram
+  um balão só); `(*VM).SetRasEntries([]ipc.RasEntry)`; `(*VM).Names() []string`; `(*VM).About(stats client.Stats) string`. O aviso de
+  config vem do `configStatus` e do `Snapshot.Config` (Task 1) e não se perde ao reconectar.
 
 - [ ] **Step 1: Escrever o teste que falha**
 
@@ -2644,47 +2890,112 @@ func TestModelConfigStatus(t *testing.T) {
 	if got := vm.Model(now).Notice; got != "" {
 		t.Fatalf("corrigido: %q", got)
 	}
-	// Reconexão esquece o aviso antigo (o serviço pode ter reiniciado com o arquivo corrigido).
-	vm.Apply(client.Event{Kind: client.EvConfigStatus, ConfigStatus: ipc.ConfigStatus{OK: false, Message: "x"}})
-	connected(vm)
-	if got := vm.Model(now).Notice; got != "" {
-		t.Fatalf("após reconectar: %q", got)
+}
+
+// A bandeja aberta com o config.json já inválido (o serviço só publica
+// configStatus quando muda) sabe pelo snapshot; reconectar não esquece o
+// aviso se o snapshot não trouxer o estado, e o snapshot com OK o limpa.
+func TestModelConfigStatusFromSnapshot(t *testing.T) {
+	vm := New("2.0.0")
+	vm.Apply(client.Event{Kind: client.EvConn, Conn: client.Conn{State: client.Connected}})
+	vm.Apply(client.Event{Kind: client.EvSnapshot, Snapshot: ipc.Snapshot{
+		Config: &ipc.ConfigStatus{OK: false, Message: "JSON inválido: unexpected EOF"}}})
+	if got := vm.Model(now).Notice; got != "⚠ JSON inválido: unexpected EOF" {
+		t.Fatalf("snapshot: %q", got)
 	}
+	vm.Apply(client.Event{Kind: client.EvConn, Conn: client.Conn{State: client.Unavailable}})
+	vm.Apply(client.Event{Kind: client.EvConn, Conn: client.Conn{State: client.Connected}})
+	vm.Apply(client.Event{Kind: client.EvSnapshot, Snapshot: ipc.Snapshot{}})
+	if got := vm.Model(now).Notice; got != "⚠ JSON inválido: unexpected EOF" {
+		t.Fatalf("reconexão sem estado no snapshot: %q", got)
+	}
+	vm.Apply(client.Event{Kind: client.EvSnapshot, Snapshot: ipc.Snapshot{Config: &ipc.ConfigStatus{OK: true}}})
+	if got := vm.Model(now).Notice; got != "" {
+		t.Fatalf("corrigido no snapshot: %q", got)
+	}
+}
+
+// Entre o Connected e o primeiro snapshot ainda não se sabe nada das VPNs:
+// "conectando", não "Nenhuma VPN configurada".
+func TestModelBeforeSnapshot(t *testing.T) {
+	vm := New("2.0.0")
+	vm.Apply(client.Event{Kind: client.EvConn, Conn: client.Conn{State: client.Connected, ServerVersion: "2.0.0"}})
+	m := vm.Model(now)
+	if m.Connected || m.Icon != IconGray || m.Header != "Conectando ao serviço VPN Monitor…" || len(m.VPNs) != 0 {
+		t.Fatalf("antes do snapshot: %+v", m)
+	}
+	vm.Apply(client.Event{Kind: client.EvSnapshot, Snapshot: ipc.Snapshot{}})
+	if m := vm.Model(now); !m.Connected || m.Header != "Nenhuma VPN configurada" {
+		t.Fatalf("depois do snapshot: %+v", m)
+	}
+}
+
+func notice(vpn, kind string) client.Event {
+	return client.Event{Kind: client.EvNotice, Notice: ipc.NoticeEvent{VPN: vpn, Kind: kind, Text: "VPN " + vpn + " " + kind}}
 }
 
 func TestBalloons(t *testing.T) {
 	vm := New("2.0.0")
 	connected(vm, ipc.VPNView{Name: "Matriz", State: ipc.StateConectada})
-	for _, n := range []ipc.NoticeEvent{
-		{VPN: "Matriz", Kind: "down", Text: "VPN Matriz caiu"},
-		{VPN: "Matriz", Kind: "up", Text: "VPN Matriz voltou (fora do ar por 4 min)"},
-		{VPN: "Matriz", Kind: "credential", Text: `VPN Matriz: credencial rejeitada — rode vpnmon-svc credential set "Matriz"`},
-		{VPN: "Matriz", Kind: "config", Text: "VPN Matriz: erro de configuração: x"},
-		{VPN: "Matriz", Kind: "novo", Text: strings.Repeat("y", 400)},
-	} {
-		vm.Apply(client.Event{Kind: client.EvNotice, Notice: n})
+	if _, ok := vm.TakeBalloon(); ok {
+		t.Fatal("sem avisos, sem balão")
 	}
-	got := vm.TakeBalloons()
-	kinds := []BalloonKind{BalloonWarning, BalloonInfo, BalloonError, BalloonError, BalloonInfo}
-	if len(got) != len(kinds) {
-		t.Fatalf("%d balões", len(got))
-	}
-	for i, b := range got {
-		if b.Kind != kinds[i] || b.Title != "VPN Monitor" {
-			t.Errorf("balão %d: %+v", i, b)
+	// Um aviso: o texto do serviço, com o ícone do tipo.
+	single := []struct {
+		kind string
+		want BalloonKind
+	}{{"down", BalloonWarning}, {"up", BalloonInfo}, {"credential", BalloonError}, {"config", BalloonError}, {"novo", BalloonInfo}}
+	for _, c := range single {
+		vm.Apply(notice("Matriz", c.kind))
+		b, ok := vm.TakeBalloon()
+		if !ok || b.Kind != c.want || b.Title != "VPN Monitor" || b.Text != "VPN Matriz "+c.kind {
+			t.Errorf("%s: %+v", c.kind, b)
 		}
 	}
-	if got[0].Text != "VPN Matriz caiu" || len([]rune(got[4].Text)) > maxBalloon {
-		t.Fatalf("textos: %q / %d", got[0].Text, len([]rune(got[4].Text)))
+	vm.Apply(client.Event{Kind: client.EvNotice, Notice: ipc.NoticeEvent{VPN: "M", Kind: "down", Text: strings.Repeat("y", 400)}})
+	if b, _ := vm.TakeBalloon(); len([]rune(b.Text)) > maxBalloon {
+		t.Fatalf("texto longo: %d", len([]rune(b.Text)))
 	}
-	if len(vm.TakeBalloons()) != 0 {
-		t.Fatal("TakeBalloons esvazia a fila")
+	if _, ok := vm.TakeBalloon(); ok {
+		t.Fatal("TakeBalloon esvazia a fila")
 	}
 	// notifications=false no snapshot: só log, sem balão.
 	vm.Apply(client.Event{Kind: client.EvSnapshot, Snapshot: ipc.Snapshot{Notifications: false}})
-	vm.Apply(client.Event{Kind: client.EvNotice, Notice: ipc.NoticeEvent{Kind: "down", Text: "VPN Matriz caiu"}})
-	if len(vm.TakeBalloons()) != 0 {
+	vm.Apply(notice("Matriz", "down"))
+	if _, ok := vm.TakeBalloon(); ok {
 		t.Fatal("avisos desligados")
+	}
+}
+
+// Vários avisos de uma vez (ex.: a rede caiu e levou três VPNs) viram um
+// balão só, com o ícone do mais grave.
+func TestBalloonsAggregate(t *testing.T) {
+	cases := []struct {
+		name  string
+		in    []client.Event
+		title string
+		text  string
+		kind  BalloonKind
+	}{
+		{"três caíram", []client.Event{notice("A", "down"), notice("B", "down"), notice("C", "down")},
+			"VPN Monitor — 3 avisos", "3 VPNs caíram: A, B, C", BalloonWarning},
+		{"mesma VPN duas vezes", []client.Event{notice("A", "down"), notice("A", "down")},
+			"VPN Monitor — 2 avisos", "VPN A caiu", BalloonWarning},
+		{"voltaram", []client.Event{notice("A", "up"), notice("B", "up")},
+			"VPN Monitor — 2 avisos", "2 VPNs voltaram: A, B", BalloonInfo},
+		{"mistura", []client.Event{notice("A", "down"), notice("B", "up"), notice("C", "credential"), notice("A", "up"), notice("D", "novo")},
+			"VPN Monitor — 5 avisos", "Caíram: A\nCredencial rejeitada: C\nVoltaram: B, A\nOutros avisos: D", BalloonError},
+	}
+	for _, c := range cases {
+		vm := New("2.0.0")
+		connected(vm)
+		for _, ev := range c.in {
+			vm.Apply(ev)
+		}
+		b, ok := vm.TakeBalloon()
+		if !ok || b.Title != c.title || b.Text != c.text || b.Kind != c.kind {
+			t.Errorf("%s: %+v", c.name, b)
+		}
 	}
 }
 
@@ -2714,11 +3025,16 @@ func TestAddEntries(t *testing.T) {
 
 func TestAbout(t *testing.T) {
 	vm := New("2.1.0")
-	if got := vm.About(); got != "VPN Monitor\nBandeja: 2.1.0\nServiço: não conectado" {
+	if got := vm.About(client.Stats{}); got != "VPN Monitor\nBandeja: 2.1.0\nServiço: não conectado" {
 		t.Fatalf("%q", got)
 	}
 	connected(vm)
-	if got := vm.About(); !strings.Contains(got, "Serviço: 2.0.0") {
+	if got := vm.About(client.Stats{}); !strings.Contains(got, "Serviço: 2.0.0") || strings.Contains(got, "reconhecidas") {
+		t.Fatalf("%q", got)
+	}
+	// Serviço mais novo: o que a decodificação tolerante deixou passar aparece aqui.
+	got := vm.About(client.Stats{DroppedEvents: 2, UnknownFields: 5})
+	if !strings.Contains(got, "2 evento(s) descartado(s), 5 com campos novos ignorados") {
 		t.Fatalf("%q", got)
 	}
 }
@@ -2796,12 +3112,13 @@ type Model struct {
 type VM struct {
 	appVersion    string
 	conn          client.Conn
+	hasSnapshot   bool // depois de Connected, até o snapshot, ainda "conectando"
 	vpns          []ipc.VPNView
 	notifications bool
 	cfg           ipc.ConfigStatus
 	ras           []ipc.RasEntry
 	rasLoaded     bool
-	balloons      []Balloon
+	pending       []ipc.NoticeEvent
 }
 
 // New cria o VM no estado "conectando".
@@ -2814,13 +3131,19 @@ func (vm *VM) Apply(ev client.Event) {
 	switch ev.Kind {
 	case client.EvConn:
 		vm.conn = ev.Conn
-		// Ao conectar (de novo) e ao perder a conexão, o que se sabia do
-		// serviço deixa de valer; o snapshot que segue o Connected repõe.
+		// Ao conectar (de novo) e ao perder a conexão, a lista de VPNs deixa
+		// de valer; o snapshot que segue o Connected repõe. O estado da config
+		// fica: o snapshot o traz de novo (Snapshot.Config) e, se não trouxer,
+		// o último aviso conhecido continua valendo.
+		vm.hasSnapshot = false
 		vm.vpns, vm.ras, vm.rasLoaded = nil, nil, false
-		vm.cfg = ipc.ConfigStatus{OK: true}
 	case client.EvSnapshot:
+		vm.hasSnapshot = true
 		vm.vpns = slices.Clone(ev.Snapshot.VPNs)
 		vm.notifications = ev.Snapshot.Notifications
+		if ev.Snapshot.Config != nil {
+			vm.cfg = *ev.Snapshot.Config
+		}
 	case client.EvVPNState:
 		i := slices.IndexFunc(vm.vpns, func(v ipc.VPNView) bool { return v.Name == ev.VPN.Name })
 		if i < 0 {
@@ -2830,29 +3153,87 @@ func (vm *VM) Apply(ev client.Event) {
 		}
 	case client.EvNotice:
 		if vm.notifications {
-			vm.balloons = append(vm.balloons, balloon(ev.Notice))
+			vm.pending = append(vm.pending, ev.Notice)
 		}
 	case client.EvConfigStatus:
 		vm.cfg = ev.ConfigStatus
 	}
 }
 
-func balloon(n ipc.NoticeEvent) Balloon {
-	kind := BalloonInfo
-	switch n.Kind {
+func balloonKind(noticeKind string) BalloonKind {
+	switch noticeKind {
 	case "down":
-		kind = BalloonWarning
+		return BalloonWarning
 	case "credential", "config":
-		kind = BalloonError
+		return BalloonError
 	}
-	return Balloon{Title: "VPN Monitor", Text: truncateUTF16(n.Text, maxBalloon), Kind: kind}
+	return BalloonInfo
 }
 
-// TakeBalloons devolve os balões pendentes e esvazia a fila.
-func (vm *VM) TakeBalloons() []Balloon {
-	b := vm.balloons
-	vm.balloons = nil
-	return b
+// noticeGroups é a ordem e os textos dos grupos de um balão agregado: frase
+// com várias VPNs, frase com uma, e rótulo quando há tipos misturados. O
+// último grupo recebe os tipos que esta bandeja não conhece.
+var noticeGroups = []struct{ kind, many, one, label string }{
+	{"down", "%d VPNs caíram: %s", "VPN %s caiu", "Caíram"},
+	{"credential", "%d VPNs com credencial rejeitada: %s", "VPN %s: credencial rejeitada", "Credencial rejeitada"},
+	{"config", "%d VPNs com erro de configuração: %s", "VPN %s: erro de configuração", "Erro de configuração"},
+	{"up", "%d VPNs voltaram: %s", "VPN %s voltou", "Voltaram"},
+	{"", "%d VPNs com avisos: %s", "Aviso da VPN %s", "Outros avisos"},
+}
+
+func noticeGroup(kind string) int {
+	for i, g := range noticeGroups[:len(noticeGroups)-1] {
+		if g.kind == kind {
+			return i
+		}
+	}
+	return len(noticeGroups) - 1
+}
+
+// TakeBalloon junta os avisos pendentes num balão só e esvazia a fila
+// (ok=false se não há). Um aviso sai com o texto do serviço; vários (ex.: a
+// rede caiu e levou três VPNs) viram um resumo com o ícone do mais grave, em
+// vez de uma rajada de toasts que o Windows enfileiraria.
+func (vm *VM) TakeBalloon() (Balloon, bool) {
+	p := vm.pending
+	vm.pending = nil
+	switch len(p) {
+	case 0:
+		return Balloon{}, false
+	case 1:
+		return Balloon{Title: "VPN Monitor", Text: truncateUTF16(p[0].Text, maxBalloon), Kind: balloonKind(p[0].Kind)}, true
+	}
+	b := Balloon{Title: fmt.Sprintf("VPN Monitor — %d avisos", len(p))}
+	names := make([][]string, len(noticeGroups))
+	for _, n := range p {
+		i := noticeGroup(n.Kind)
+		if !slices.Contains(names[i], n.VPN) {
+			names[i] = append(names[i], n.VPN)
+		}
+		b.Kind = max(b.Kind, balloonKind(n.Kind))
+	}
+	var used []int
+	for i := range names {
+		if len(names[i]) > 0 {
+			used = append(used, i)
+		}
+	}
+	if len(used) == 1 {
+		g, list := noticeGroups[used[0]], names[used[0]]
+		if len(list) == 1 {
+			b.Text = fmt.Sprintf(g.one, list[0])
+		} else {
+			b.Text = fmt.Sprintf(g.many, len(list), strings.Join(list, ", "))
+		}
+	} else {
+		lines := make([]string, len(used))
+		for k, i := range used {
+			lines[k] = noticeGroups[i].label + ": " + strings.Join(names[i], ", ")
+		}
+		b.Text = strings.Join(lines, "\n")
+	}
+	b.Text = truncateUTF16(b.Text, maxBalloon)
+	return b, true
 }
 
 // SetRasEntries guarda a resposta de listRasEntries.
@@ -2869,18 +3250,24 @@ func (vm *VM) Names() []string {
 	return out
 }
 
-// About é o texto de "Sobre / versão".
-func (vm *VM) About() string {
+// About é o texto de "Sobre / versão". stats são as contagens do cliente:
+// mensagens de um serviço mais novo que esta bandeja não entendeu inteiras.
+func (vm *VM) About(stats client.Stats) string {
 	svc := "não conectado"
 	if vm.conn.State == client.Connected {
 		svc = vm.conn.ServerVersion
 	}
-	return fmt.Sprintf("VPN Monitor\nBandeja: %s\nServiço: %s", vm.appVersion, svc)
+	s := fmt.Sprintf("VPN Monitor\nBandeja: %s\nServiço: %s", vm.appVersion, svc)
+	if stats.DroppedEvents > 0 || stats.UnknownFields > 0 {
+		s += fmt.Sprintf("\n\nMensagens do serviço não reconhecidas: %d evento(s) descartado(s), %d com campos novos ignorados.\n"+
+			"Atualize a bandeja para a versão do serviço.", stats.DroppedEvents, stats.UnknownFields)
+	}
+	return s
 }
 
 // Model monta o modelo de tela para o instante now (tique de 1 s).
 func (vm *VM) Model(now time.Time) Model {
-	if vm.conn.State != client.Connected {
+	if vm.conn.State != client.Connected || !vm.hasSnapshot {
 		return vm.disconnected()
 	}
 	m := Model{Connected: true, Icon: IconGray}
@@ -2925,7 +3312,7 @@ func (vm *VM) Model(now time.Time) Model {
 func (vm *VM) disconnected() Model {
 	m := Model{Icon: IconGray, Notice: MenuEscape(Truncate(vm.conn.Message, maxNotice))}
 	switch vm.conn.State {
-	case client.Connecting:
+	case client.Connecting, client.Connected: // Connected sem snapshot ainda
 		m.Header, m.ToolTip = "Conectando ao serviço VPN Monitor…", "VPN Monitor — conectando ao serviço"
 	case client.Incompatible:
 		m.Header, m.ToolTip = "Atualize o VPN Monitor", "VPN Monitor — atualize o VPN Monitor"
@@ -2985,7 +3372,8 @@ git commit -m "feat(tray): modelo de tela (cabeçalho, ícone, tooltip, conexão
   `Reconnect`, `Resume`, `Remove(vpn string) Command`; `SetEnabled(vpn string, enabled bool) Command`; `ListRasEntries()`, `GetConfig()`,
   `LogTail() Command`; `type PauseChoice int` (`Pause15Min`, `Pause1Hour`, `PauseUntilResume`); `PauseChoices []struct{ Choice PauseChoice;
   Label string }`; `Pause(vpn string, c PauseChoice, now time.Time) Command`; `AddFromEntry(entry string, existing []string) Command`;
-  `ErrorText(err error) string`; `RemoveConfirm(vpn string) string`. Nos testes: `wire(t, Command) string` (usado pela Task 10).
+  `ErrorText(err error) string`; `RemoveConfirm(vpn string) string`; `(VPNItem).ToggleCommand() Command` (Desativar/Ativar). Nos testes:
+  `wire(t, Command) string` (usado pela Task 10).
 
 - [ ] **Step 1: Escrever o teste que falha**
 
@@ -3034,6 +3422,17 @@ func TestSimpleCommands(t *testing.T) {
 		if got := strings.TrimSuffix(wire(t, c), " "); got != want {
 			t.Errorf("%q, esperava %q", got, want)
 		}
+	}
+}
+
+func TestToggleCommand(t *testing.T) {
+	on := vpnItem(ipc.VPNView{Name: "Matriz", State: ipc.StateConectada, Enabled: true}, now)
+	off := vpnItem(ipc.VPNView{Name: "Matriz", State: ipc.StateDesativada}, now)
+	if got := wire(t, on.ToggleCommand()); got != `setEnabled {"vpn":"Matriz","enabled":false}` || on.ToggleLabel != "Desativar" {
+		t.Fatalf("ativa: %s", got)
+	}
+	if got := wire(t, off.ToggleCommand()); got != `setEnabled {"vpn":"Matriz","enabled":true}` || off.ToggleLabel != "Ativar" {
+		t.Fatalf("desativada: %s", got)
 	}
 }
 
@@ -3171,6 +3570,9 @@ func SetEnabled(vpn string, enabled bool) Command {
 	return Command{ipc.TypeSetEnabled, ipc.SetEnabledRequest{VPN: vpn, Enabled: enabled}}
 }
 
+// ToggleCommand é o pedido do item "Desativar"/"Ativar" do submenu.
+func (it VPNItem) ToggleCommand() Command { return SetEnabled(it.Name, !it.Enabled) }
+
 // PauseChoice é uma opção do submenu "Pausar".
 type PauseChoice int
 
@@ -3290,6 +3692,9 @@ git commit -m "feat(tray): pedidos do menu (pausar, adicionar por entrada RAS, m
   `FormFrom(config.VPN) Form`; `NewForm() Form`; `(Form).HostEnabled()`, `(Form).PortEnabled() bool`; `(Form).Command() (Command, FieldErrors)`;
   `ServiceErrors(err error) (FieldErrors, string)`; `type Globals struct{ Notifications bool; LogLevel string }`; `GlobalsFrom(config.Config)
   Globals`; `(Globals).Command() Command`; `VPNNames(config.Config) []string`; `FindVPN(config.Config, name string) (config.VPN, bool)`.
+  Para a janela só copiar valores: `TextFields []string`; `(Form).Text(field) string`, `(Form).WithText(field, value) Form`,
+  `(Form).KindIndex() int`, `(Form).WithKindIndex(i int) Form`, `(Form).NameReadOnly() bool`; `(Globals).LevelIndex() int`,
+  `(Globals).WithLevelIndex(i int) Globals`; `SelectIndex(names []string, name string) int`; `EntryNames([]ipc.RasEntry) []string`.
 
 - [ ] **Step 1: Escrever o teste que falha**
 
@@ -3300,6 +3705,7 @@ package viewmodel
 
 import (
 	"errors"
+	"slices"
 	"testing"
 
 	"github.com/guibsu/vpn-tray-monitor/internal/core/config"
@@ -3463,6 +3869,52 @@ func TestConfigHelpers(t *testing.T) {
 		if FieldLabels[f] == "" {
 			t.Errorf("sem rótulo: %s", f)
 		}
+	}
+}
+
+// A janela só copia valores: ler e escrever o formulário mora aqui.
+func TestFormFieldAccess(t *testing.T) {
+	f := FormFrom(sampleVPN())
+	for _, field := range append(slices.Clone(TextFields), FieldRasEntry) {
+		g := f.WithText(field, "novo-"+field)
+		if g.Text(field) != "novo-"+field {
+			t.Errorf("%s: %q", field, g.Text(field))
+		}
+		if f.Text(field) == "novo-"+field {
+			t.Errorf("%s: WithText alterou o original", field)
+		}
+	}
+	if f.Text(FieldEnabled) != "" || f.WithText(FieldKind, "x") != f {
+		t.Fatal("campos que não são texto")
+	}
+	if f.Text(FieldPort) != "443" || f.Text(FieldRasEntry) != "VPN Matriz" {
+		t.Fatalf("valores: %+v", f)
+	}
+	if f.KindIndex() != 1 || f.WithKindIndex(2).Kind != "link" || f.WithKindIndex(-1).Kind != "tcp" || f.WithKindIndex(9).Kind != "tcp" {
+		t.Fatal("tipo por posição")
+	}
+	if !f.NameReadOnly() || NewForm().NameReadOnly() {
+		t.Fatal("nome somente leitura só em VPN existente")
+	}
+	g := Globals{LogLevel: "warn"}
+	if g.LevelIndex() != 2 || g.WithLevelIndex(0).LogLevel != "debug" || g.WithLevelIndex(7).LogLevel != "warn" {
+		t.Fatal("nível por posição")
+	}
+}
+
+func TestSelectIndex(t *testing.T) {
+	names := []string{"Matriz", "Filial"}
+	cases := map[string]int{"Filial": 1, " filial ": 1, "Removida": 0, "": 0}
+	for name, want := range cases {
+		if got := SelectIndex(names, name); got != want {
+			t.Errorf("%q: %d", name, got)
+		}
+	}
+	if SelectIndex(nil, "x") != -1 {
+		t.Fatal("lista vazia")
+	}
+	if got := EntryNames([]ipc.RasEntry{{Name: "A", Monitored: true}, {Name: "B"}}); len(got) != 2 || got[1] != "B" {
+		t.Fatalf("%v", got)
 	}
 }
 ```
@@ -3702,6 +4154,104 @@ func FindVPN(c config.Config, name string) (config.VPN, bool) {
 	}
 	return config.VPN{}, false
 }
+
+// TextFields são os campos editados em caixa de texto (o resto: entrada RAS
+// em caixa editável com sugestões, tipo em lista, ativada em marcação).
+var TextFields = []string{FieldName, FieldHost, FieldPort, FieldTimeout, FieldInterval, FieldFailures,
+	FieldGrace, FieldConnectTimeout, FieldMaxBackoff}
+
+// textField aponta o campo de texto do formulário (nil se não for de texto).
+func (f *Form) textField(field string) *string {
+	switch field {
+	case FieldName:
+		return &f.Name
+	case FieldRasEntry:
+		return &f.RasEntry
+	case FieldHost:
+		return &f.Host
+	case FieldPort:
+		return &f.Port
+	case FieldTimeout:
+		return &f.Timeout
+	case FieldInterval:
+		return &f.Interval
+	case FieldFailures:
+		return &f.Failures
+	case FieldGrace:
+		return &f.Grace
+	case FieldConnectTimeout:
+		return &f.ConnectTimeout
+	case FieldMaxBackoff:
+		return &f.MaxBackoff
+	}
+	return nil
+}
+
+// Text é o valor de um campo de texto ("" para os demais).
+func (f Form) Text(field string) string {
+	if p := f.textField(field); p != nil {
+		return *p
+	}
+	return ""
+}
+
+// WithText devolve o formulário com o campo de texto trocado (os demais
+// campos são ignorados).
+func (f Form) WithText(field, value string) Form {
+	if p := f.textField(field); p != nil {
+		*p = value
+	}
+	return f
+}
+
+// KindIndex é a posição do tipo de verificação em CheckKinds (-1 se nenhum).
+func (f Form) KindIndex() int { return slices.Index(CheckKinds, f.Kind) }
+
+// WithKindIndex escolhe o tipo pela posição na lista (fora dela, mantém).
+func (f Form) WithKindIndex(i int) Form {
+	if i >= 0 && i < len(CheckKinds) {
+		f.Kind = CheckKinds[i]
+	}
+	return f
+}
+
+// NameReadOnly: só uma VPN nova tem nome editável (§5.2: o nome é a identidade).
+func (f Form) NameReadOnly() bool { return !f.IsNew }
+
+// LevelIndex é a posição do nível de log em LogLevels (-1 se nenhum).
+func (g Globals) LevelIndex() int { return slices.Index(LogLevels, g.LogLevel) }
+
+// WithLevelIndex escolhe o nível pela posição na lista (fora dela, mantém).
+func (g Globals) WithLevelIndex(i int) Globals {
+	if i >= 0 && i < len(LogLevels) {
+		g.LogLevel = LogLevels[i]
+	}
+	return g
+}
+
+// SelectIndex é a linha a selecionar na lista de VPNs depois de recarregar:
+// a VPN dada (sem diferenciar maiúsculas, sem espaços nas pontas), senão a
+// primeira; -1 com a lista vazia (abre o formulário de VPN nova).
+func SelectIndex(names []string, name string) int {
+	if len(names) == 0 {
+		return -1
+	}
+	key := config.NameKey(strings.TrimSpace(name))
+	if i := slices.IndexFunc(names, func(n string) bool { return config.NameKey(n) == key }); i >= 0 {
+		return i
+	}
+	return 0
+}
+
+// EntryNames são as sugestões da caixa "Entrada RAS" (todas as entradas do
+// catálogo de todos os usuários, monitoradas ou não).
+func EntryNames(entries []ipc.RasEntry) []string {
+	out := make([]string, len(entries))
+	for i, e := range entries {
+		out[i] = e.Name
+	}
+	return out
+}
 ```
 
 A cobertura do pacote deve ficar ≥ 80 % (na validação: 99,4 %); o alvo `make cover-tray`, que a confere, entra na Task 13.
@@ -3738,13 +4288,16 @@ git commit -m "feat(tray): formulário de Configurações no view-model (pedido 
 - Test: `internal/features/tray/view/guard_test.go`
 
 **Interfaces:**
-- Consumes: `client.Event`, `client.EvSnapshot` (Task 4); `viewmodel.New`, `VM.Apply/Model/TakeBalloons/SetRasEntries/Names/About`,
+- Consumes: `client.Event`, `client.EvSnapshot`, `client.Stats` (Task 4); `viewmodel.New`, `VM.Apply/Model/TakeBalloon/SetRasEntries/Names/About`,
   `Model`, `VPNItem`, `Balloon*`, `Icon*` (Task 8); `CheckNow`, `Reconnect`, `Pause`, `PauseChoices`, `Resume`, `SetEnabled`, `Remove`,
-  `RemoveConfirm`, `AddFromEntry`, `ListRasEntries`, `GetConfig`, `LogTail`, `ErrorText`, `Command` (Task 9); `Form`, `FormFrom`, `NewForm`,
-  `FormFields`, `FieldLabels`, `Field*`, `CheckKinds`, `LogLevels`, `ServiceErrors`, `Globals`, `GlobalsFrom`, `VPNNames`, `FindVPN` (Task 10);
+  `RemoveConfirm`, `AddFromEntry`, `ListRasEntries`, `GetConfig`, `LogTail`, `ErrorText`, `Command`, `VPNItem.ToggleCommand` (Task 9); `Form`,
+  `FormFrom`, `NewForm`, `FormFields`, `TextFields`, `FieldLabels`, `Field*`, `CheckKinds`, `LogLevels`, `ServiceErrors`, `Globals`,
+  `GlobalsFrom`, `VPNNames`, `FindVPN`, `Form.Text/WithText/KindIndex/WithKindIndex/NameReadOnly`, `Globals.LevelIndex/WithLevelIndex`,
+  `SelectIndex`, `EntryNames` (Task 10);
   `assets.Image`, `assets.Conectada/Conectando/Desconectada/Inativa` (Task 2).
 - Produces: `view.Caller` (`Call(ctx, typ string, payload, out any) error`; `*client.Client` satisfaz), `view.Options{ Events <-chan client.Event;
-  Caller Caller; AppVersion string; Log *slog.Logger }`, `view.Run(o Options) (exitCode int, err error)` — chamado da goroutine principal.
+  Caller Caller; Stats func() client.Stats; AppVersion string; Log *slog.Logger }`, `view.Run(o Options) (exitCode int, err error)` —
+  chamado da goroutine principal.
 
 - [ ] **Step 1: Acrescentar o walk ao módulo**
 
@@ -3850,8 +4403,11 @@ type Caller interface {
 
 // Options liga a view ao cliente.
 type Options struct {
-	Events     <-chan client.Event
-	Caller     Caller
+	Events <-chan client.Event
+	Caller Caller
+	// Stats dá as contagens da decodificação tolerante para "Sobre"
+	// ((*client.Client).Stats); nil = nenhuma.
+	Stats      func() client.Stats
 	AppVersion string
 	Log        *slog.Logger
 }
@@ -3867,6 +4423,7 @@ type Tray struct {
 	ni       *walk.NotifyIcon
 	vm       *viewmodel.VM
 	icons    map[viewmodel.Icon]*walk.Icon
+	dpi      int // DPI em que os ícones foram gerados
 	last     viewmodel.Model
 	settings *settingsWin
 	logs     *logWin
@@ -3883,6 +4440,9 @@ func Run(o Options) (int, error) {
 	if o.Log == nil {
 		o.Log = slog.New(slog.DiscardHandler)
 	}
+	if o.Stats == nil {
+		o.Stats = func() client.Stats { return client.Stats{} }
+	}
 	app, err := walk.InitApp()
 	if err != nil {
 		return 1, fmt.Errorf("iniciando a interface: %w", err)
@@ -3892,7 +4452,7 @@ func Run(o Options) (int, error) {
 		return 1, fmt.Errorf("criando o ícone da bandeja: %w", err)
 	}
 	defer ni.Dispose()
-	t := &Tray{o: o, app: app, ni: ni, vm: viewmodel.New(o.AppVersion), icons: map[viewmodel.Icon]*walk.Icon{}}
+	t := &Tray{o: o, app: app, ni: ni, vm: viewmodel.New(o.AppVersion)}
 	if err := t.loadIcons(); err != nil {
 		return 1, err
 	}
@@ -3917,12 +4477,19 @@ func Run(o Options) (int, error) {
 	return code, nil
 }
 
-// loadIcons prepara os quatro ícones no tamanho do DPI da bandeja.
-func (t *Tray) loadIcons() error {
-	dpi := t.ni.DPI()
-	if dpi <= 0 {
-		dpi = 96
+// trayDPI é o DPI atual da área de notificação (96 se desconhecido).
+func (t *Tray) trayDPI() int {
+	if dpi := t.ni.DPI(); dpi > 0 {
+		return dpi
 	}
+	return 96
+}
+
+// loadIcons gera os quatro ícones a partir do PNG do tamanho certo para o
+// DPI atual (16 px a 96 DPI), em vez de deixar o Windows esticar um menor.
+func (t *Tray) loadIcons() error {
+	dpi := t.trayDPI()
+	icons := map[viewmodel.Icon]*walk.Icon{}
 	for k, name := range iconNames {
 		img, err := assets.Image(name, 16*dpi/96)
 		if err != nil {
@@ -3932,7 +4499,12 @@ func (t *Tray) loadIcons() error {
 		if err != nil {
 			return fmt.Errorf("ícone %s: %w", name, err)
 		}
-		t.icons[k] = ic
+		icons[k] = ic
+	}
+	old := t.icons
+	t.icons, t.dpi = icons, dpi
+	for _, ic := range old {
+		ic.Dispose()
 	}
 	return nil
 }
@@ -3968,7 +4540,7 @@ func (t *Tray) tick(stop <-chan struct{}) {
 
 func (t *Tray) apply(ev client.Event) {
 	t.vm.Apply(ev)
-	for _, b := range t.vm.TakeBalloons() {
+	if b, ok := t.vm.TakeBalloon(); ok {
 		t.showBalloon(b)
 	}
 	t.render(t.vm.Model(time.Now()), false)
@@ -3977,8 +4549,18 @@ func (t *Tray) apply(ev client.Event) {
 	}
 }
 
-// render aplica ícone e tooltip quando mudam.
+// render aplica ícone e tooltip quando mudam. Também é onde a troca de DPI
+// é percebida (a cada tique de 1 s): o NotifyIcon do walk trata o
+// WM_DPICHANGED só redesenhando o mesmo ícone, sem gancho público; então os
+// ícones são gerados de novo no tamanho do DPI novo.
 func (t *Tray) render(m viewmodel.Model, force bool) {
+	if dpi := t.trayDPI(); dpi != t.dpi {
+		if err := t.loadIcons(); err != nil {
+			t.o.Log.Warn("gerando ícones para o DPI novo", "dpi", dpi, "erro", err)
+		} else {
+			force = true
+		}
+	}
 	if force || m.Icon != t.last.Icon {
 		if err := t.ni.SetIcon(t.icons[m.Icon]); err != nil {
 			t.o.Log.Warn("trocando o ícone", "erro", err)
@@ -4144,7 +4726,7 @@ func (t *Tray) buildMenu(m viewmodel.Model) {
 	b.item(root, "Abrir log", m.Connected, t.openLog)
 	b.sep(root)
 	b.item(root, "Sobre / versão", true, func() {
-		walk.MsgBox(nil, "Sobre o VPN Monitor", t.vm.About(), walk.MsgBoxIconInformation|walk.MsgBoxOK)
+		walk.MsgBox(nil, "Sobre o VPN Monitor", t.vm.About(t.o.Stats()), walk.MsgBoxIconInformation|walk.MsgBoxOK)
 	})
 	b.item(root, "Sair da bandeja", true, func() { t.app.Exit(0) })
 	if b.err != nil {
@@ -4167,8 +4749,7 @@ func (t *Tray) vpnMenu(b *menuBuilder, l *walk.ActionList, v viewmodel.VPNItem) 
 	}
 	b.item(l, "Retomar", v.CanResume, func() { t.do(viewmodel.Resume(name)) })
 	b.sep(l)
-	enable := !v.Enabled
-	b.item(l, v.ToggleLabel, true, func() { t.do(viewmodel.SetEnabled(name, enable)) })
+	b.item(l, v.ToggleLabel, true, func() { t.do(v.ToggleCommand()) })
 	b.item(l, "Remover…", true, func() {
 		if walk.MsgBox(nil, "Remover VPN", viewmodel.RemoveConfirm(name), walk.MsgBoxYesNo|walk.MsgBoxIconQuestion) == walk.DlgCmdYes {
 			t.do(viewmodel.Remove(name))
@@ -4263,9 +4844,6 @@ func (w *logWin) load() {
 package view
 
 import (
-	"slices"
-	"strings"
-
 	"github.com/tailscale/walk"
 	d "github.com/tailscale/walk/declarative"
 
@@ -4275,24 +4853,28 @@ import (
 )
 
 // settingsWin é a janela "Configurações…" (§7): lista de VPNs à esquerda,
-// formulário da selecionada à direita, opções gerais embaixo.
+// formulário da selecionada à direita, opções gerais embaixo. Só copia
+// valores entre os controles e o viewmodel.Form/Globals; regras e textos
+// moram no view-model.
 type settingsWin struct {
-	t       *Tray
-	mw      *walk.MainWindow
-	list    *walk.ListBox
-	edits   map[string]*walk.LineEdit // nome, host, porta e números
-	entry   *walk.ComboBox            // entrada RAS (editável)
-	kind    *walk.ComboBox
-	enabled *walk.CheckBox
-	errs    map[string]*walk.Label
-	general *walk.Label
-	save    *walk.PushButton
-	notif   *walk.CheckBox
-	level   *walk.ComboBox
+	t           *Tray
+	mw          *walk.MainWindow
+	list        *walk.ListBox
+	edits       map[string]*walk.LineEdit // viewmodel.TextFields
+	entry       *walk.ComboBox            // entrada RAS (editável, com sugestões)
+	kind        *walk.ComboBox
+	enabled     *walk.CheckBox
+	errs        map[string]*walk.Label
+	general     *walk.Label
+	save        *walk.PushButton
+	saveGlobals *walk.PushButton
+	notif       *walk.CheckBox
+	level       *walk.ComboBox
 
-	cfg   config.Config
-	form  viewmodel.Form
-	names []string
+	cfg     config.Config
+	form    viewmodel.Form
+	globals viewmodel.Globals
+	names   []string
 }
 
 var errorColor = walk.RGB(0xc0, 0x10, 0x10)
@@ -4326,7 +4908,7 @@ func newSettingsWin(t *Tray) (*settingsWin, error) {
 			grid = append(grid, d.ComboBox{AssignTo: &w.kind, Model: viewmodel.CheckKinds, OnCurrentIndexChanged: w.kindChanged})
 		case viewmodel.FieldEnabled:
 			grid = append(grid, d.CheckBox{AssignTo: &w.enabled})
-		default:
+		default: // viewmodel.TextFields
 			p := new(*walk.LineEdit)
 			editPtrs[f] = p
 			grid = append(grid, d.LineEdit{AssignTo: p})
@@ -4351,13 +4933,15 @@ func newSettingsWin(t *Tray) (*settingsWin, error) {
 			d.Label{AssignTo: &w.general, TextColor: errorColor},
 			d.Composite{Layout: d.HBox{MarginsZero: true}, Children: []d.Widget{
 				d.HSpacer{},
-				d.PushButton{AssignTo: &w.save, Text: "Salvar VPN", OnClicked: w.saveVPN},
+				// Desabilitados até o getConfig concluir: salvar antes gravaria
+				// um formulário vazio por cima da VPN.
+				d.PushButton{AssignTo: &w.save, Text: "Salvar VPN", Enabled: false, OnClicked: w.saveVPN},
 			}},
 			d.GroupBox{Title: "Opções gerais", Layout: d.Grid{Columns: 3}, Children: []d.Widget{
 				d.CheckBox{AssignTo: &w.notif, Text: "Mostrar avisos (balões)", ColumnSpan: 3},
 				d.Label{Text: "Nível de log"},
 				d.ComboBox{AssignTo: &w.level, Model: viewmodel.LogLevels},
-				d.PushButton{Text: "Salvar opções gerais", OnClicked: w.saveGlobals},
+				d.PushButton{AssignTo: &w.saveGlobals, Text: "Salvar opções gerais", Enabled: false, OnClicked: w.saveGlobalOptions},
 			}},
 		},
 	}.Create()
@@ -4376,8 +4960,16 @@ func newSettingsWin(t *Tray) (*settingsWin, error) {
 	return w, nil
 }
 
+// setSaving liga ou desliga os dois botões de salvar.
+func (w *settingsWin) setSaving(enabled bool) {
+	w.save.SetEnabled(enabled)
+	w.saveGlobals.SetEnabled(enabled)
+}
+
 // reload pede a config ao serviço e seleciona a VPN dada ("" = a primeira).
+// Os botões de salvar só voltam depois da resposta.
 func (w *settingsWin) reload(selectName string) {
+	w.setSaving(false)
 	var cfg config.Config
 	w.t.call(viewmodel.GetConfig(), &cfg, func(err error) {
 		if w.mw.IsDisposed() {
@@ -4389,32 +4981,25 @@ func (w *settingsWin) reload(selectName string) {
 		}
 		w.cfg = cfg
 		w.names = viewmodel.VPNNames(cfg)
-		g := viewmodel.GlobalsFrom(cfg)
-		w.notif.SetChecked(g.Notifications)
-		_ = w.level.SetCurrentIndex(slices.Index(viewmodel.LogLevels, g.LogLevel))
+		w.globals = viewmodel.GlobalsFrom(cfg)
+		w.notif.SetChecked(w.globals.Notifications)
+		_ = w.level.SetCurrentIndex(w.globals.LevelIndex())
 		_ = w.list.SetModel(w.names)
-		i := 0
-		if selectName != "" {
-			i = max(0, slices.IndexFunc(w.names, func(n string) bool { return config.NameKey(n) == config.NameKey(selectName) }))
-		}
-		if len(w.names) == 0 {
+		if i := viewmodel.SelectIndex(w.names, selectName); i < 0 {
 			w.newVPN()
 		} else {
 			_ = w.list.SetCurrentIndex(i)
 			w.selected()
 		}
+		w.setSaving(true)
 	})
 	var r ipc.RasEntries
 	w.t.call(viewmodel.ListRasEntries(), &r, func(err error) {
 		if err != nil || w.mw.IsDisposed() {
 			return
 		}
-		var names []string
-		for _, e := range r.Entries {
-			names = append(names, e.Name)
-		}
 		text := w.entry.Text()
-		_ = w.entry.SetModel(names)
+		_ = w.entry.SetModel(viewmodel.EntryNames(r.Entries))
 		_ = w.entry.SetText(text)
 	})
 }
@@ -4434,39 +5019,28 @@ func (w *settingsWin) newVPN() {
 	w.show(viewmodel.NewForm())
 }
 
-// show preenche os campos com o formulário e limpa os erros.
+// show copia o formulário para os controles e limpa os erros.
 func (w *settingsWin) show(f viewmodel.Form) {
 	w.form = f
-	set := func(field, v string) { _ = w.edits[field].SetText(v) }
-	set(viewmodel.FieldName, f.Name)
-	set(viewmodel.FieldHost, f.Host)
-	set(viewmodel.FieldPort, f.Port)
-	set(viewmodel.FieldTimeout, f.Timeout)
-	set(viewmodel.FieldInterval, f.Interval)
-	set(viewmodel.FieldFailures, f.Failures)
-	set(viewmodel.FieldGrace, f.Grace)
-	set(viewmodel.FieldConnectTimeout, f.ConnectTimeout)
-	set(viewmodel.FieldMaxBackoff, f.MaxBackoff)
-	_ = w.entry.SetText(f.RasEntry)
-	_ = w.kind.SetCurrentIndex(slices.Index(viewmodel.CheckKinds, f.Kind))
+	for _, field := range viewmodel.TextFields {
+		_ = w.edits[field].SetText(f.Text(field))
+	}
+	_ = w.entry.SetText(f.Text(viewmodel.FieldRasEntry))
+	_ = w.kind.SetCurrentIndex(f.KindIndex())
 	w.enabled.SetChecked(f.Enabled)
-	// Nome só é editável numa VPN nova (§5.2: o nome é a identidade).
-	_ = w.edits[viewmodel.FieldName].SetReadOnly(!f.IsNew)
+	_ = w.edits[viewmodel.FieldName].SetReadOnly(f.NameReadOnly())
 	w.kindChanged()
 	w.showErrors(nil, "")
 }
 
-// read lê os campos de volta para o formulário.
+// read copia os controles de volta para o formulário.
 func (w *settingsWin) read() viewmodel.Form {
 	f := w.form
-	get := func(field string) string { return w.edits[field].Text() }
-	f.Name, f.Host, f.Port = get(viewmodel.FieldName), get(viewmodel.FieldHost), get(viewmodel.FieldPort)
-	f.Timeout, f.Interval, f.Failures = get(viewmodel.FieldTimeout), get(viewmodel.FieldInterval), get(viewmodel.FieldFailures)
-	f.Grace, f.ConnectTimeout, f.MaxBackoff = get(viewmodel.FieldGrace), get(viewmodel.FieldConnectTimeout), get(viewmodel.FieldMaxBackoff)
-	f.RasEntry = w.entry.Text()
-	if i := w.kind.CurrentIndex(); i >= 0 {
-		f.Kind = viewmodel.CheckKinds[i]
+	for _, field := range viewmodel.TextFields {
+		f = f.WithText(field, w.edits[field].Text())
 	}
+	f = f.WithText(viewmodel.FieldRasEntry, w.entry.Text())
+	f = f.WithKindIndex(w.kind.CurrentIndex())
 	f.Enabled = w.enabled.Checked()
 	return f
 }
@@ -4495,30 +5069,30 @@ func (w *settingsWin) saveVPN() {
 		w.showErrors(local, "Corrija os campos marcados.")
 		return
 	}
-	w.save.SetEnabled(false)
+	w.setSaving(false)
 	w.t.call(c, nil, func(err error) {
 		if w.mw.IsDisposed() {
 			return
 		}
-		w.save.SetEnabled(true)
 		if err != nil {
+			w.setSaving(true)
 			w.showErrors(viewmodel.ServiceErrors(err))
 			return
 		}
-		w.reload(strings.TrimSpace(f.Name))
+		w.reload(f.Name)
 	})
 }
 
-func (w *settingsWin) saveGlobals() {
-	g := viewmodel.Globals{Notifications: w.notif.Checked(), LogLevel: w.cfg.LogLevel}
-	if i := w.level.CurrentIndex(); i >= 0 {
-		g.LogLevel = viewmodel.LogLevels[i]
-	}
+func (w *settingsWin) saveGlobalOptions() {
+	g := w.globals.WithLevelIndex(w.level.CurrentIndex())
+	g.Notifications = w.notif.Checked()
+	w.setSaving(false)
 	w.t.call(g.Command(), nil, func(err error) {
 		if w.mw.IsDisposed() {
 			return
 		}
 		if err != nil {
+			w.setSaving(true)
 			_, msg := viewmodel.ServiceErrors(err)
 			_ = w.general.SetText(msg)
 			return
@@ -4533,6 +5107,13 @@ Por que o menu é refeito no `ShowingContextMenu`: um menu de contexto aberto é
 itens alterados com ele aberto; mexer nele durante o laço modal (os `Synchronize` rodam lá dentro) seria pior. Assim os detalhes ("há 3 h",
 "próxima em 40 s") saem atuais a cada abertura, e o tique de 1 s mantém ícone e tooltip. Os submenus antigos são liberados
 (`disposeMenus`) antes de cada recriação.
+
+Troca de DPI (monitor diferente, escala alterada): o `NotifyIcon` do walk trata o `WM_DPICHANGED` só redesenhando o mesmo ícone e não
+expõe evento; por isso `render` confere `ni.DPI()` a cada tique de 1 s e, se mudou, gera os quatro ícones de novo a partir do PNG do
+tamanho certo (`assets.Image(nome, 16*dpi/96)`), descartando os antigos.
+
+Na janela de Configurações os dois botões de salvar nascem desabilitados e só voltam quando o `getConfig` responde (salvar antes gravaria
+um formulário vazio por cima da VPN); a janela só copia valores entre controles e `viewmodel.Form`/`Globals`.
 
 Conferência manual de API, se o `go vet` reclamar: `walk.MsgBox` está marcado como obsoleto (o lint do Marco C pode pedir `TaskDialog`),
 mas compila e é o que o plano usa.
@@ -4566,9 +5147,10 @@ git commit -m "feat(tray): view walk (ícone, menu, balões, Configurações, lo
 
 **Interfaces:**
 - Consumes: `instance.Acquire`, `instance.TrayMutex`, `instance.ErrAlreadyRunning` (Task 3); `client.New`, `client.Options`, `(*Client).Run`,
-  `(*Client).Events` (Task 5); `ipc.Dial` (Marco A; confere o PID e devolve `ipc.ErrNotService`); `view.Run`, `view.Options` (Task 11).
+  `(*Client).Events`, `(*Client).Stats` (Tasks 4–5); `ipc.Dial` (Marco A; confere o PID e devolve `ipc.ErrNotService`); `view.Run`, `view.Options` (Task 11).
 - Produces: `cmd/vpnmon-tray` com as variáveis `version`, `commit`, `date` (preenchidas por `-ldflags -X main.…`, como no `vpnmon-svc`) e
-  `appVersion() string` (versão mostrada em "Sobre" e enviada no hello).
+  `appVersion() string` (versão mostrada em "Sobre" e enviada no hello; fora de uma tag o `git describe` já começa pelo commit, que então
+  não se repete entre parênteses).
 
 - [ ] **Step 1: Escrever o teste que falha**
 
@@ -4585,6 +5167,10 @@ func TestAppVersion(t *testing.T) {
 		{"dev", "", "", "dev"},
 		{"v2.1.0", "abc1234", "", "v2.1.0 (abc1234)"},
 		{"v2.1.0", "abc1234", "2026-10-08T12:00:00Z", "v2.1.0 (abc1234, 2026-10-08T12:00:00Z)"},
+		// Fora de tag o git describe já é o commit: não repete.
+		{"abc1234-dirty", "abc1234", "2026-10-08T12:00:00Z", "abc1234-dirty (2026-10-08T12:00:00Z)"},
+		{"abc1234", "abc1234", "", "abc1234"},
+		{"v2.1.0-3-gabc1234", "abc1234", "", "v2.1.0-3-gabc1234 (abc1234)"},
 	}
 	for _, c := range cases {
 		version, commit, date = c.v, c.c, c.d
@@ -4610,7 +5196,10 @@ Expected: FAIL — build failed: `undefined: version`, `undefined: appVersion`
 // se registra sozinha.
 package main
 
-import "os"
+import (
+	"os"
+	"strings"
+)
 
 // Preenchidos por -ldflags no build de release.
 var (
@@ -4620,14 +5209,20 @@ var (
 )
 
 // appVersion é a versão mostrada em "Sobre / versão" e enviada no hello.
+// Fora de uma tag, o git describe já começa pelo commit ("5210ef3-dirty"):
+// aí o commit não se repete entre parênteses.
 func appVersion() string {
-	switch {
-	case commit != "" && date != "":
-		return version + " (" + commit + ", " + date + ")"
-	case commit != "":
-		return version + " (" + commit + ")"
+	var extra []string
+	if commit != "" && !strings.HasPrefix(version, commit) {
+		extra = append(extra, commit)
 	}
-	return version
+	if date != "" {
+		extra = append(extra, date)
+	}
+	if len(extra) == 0 {
+		return version
+	}
+	return version + " (" + strings.Join(extra, ", ") + ")"
 }
 
 func main() { os.Exit(run()) }
@@ -4690,7 +5285,7 @@ func run() int {
 	c := client.New(client.Options{Dial: ipc.Dial, AppVersion: appVersion()})
 	go c.Run(ctx)
 
-	code, err := view.Run(view.Options{Events: c.Events(), Caller: c, AppVersion: appVersion(), Log: slog.New(slog.DiscardHandler)})
+	code, err := view.Run(view.Options{Events: c.Events(), Caller: c, Stats: c.Stats, AppVersion: appVersion(), Log: slog.New(slog.DiscardHandler)})
 	if err != nil {
 		fatal(err.Error())
 	}
@@ -4953,7 +5548,9 @@ O `make build` roda antes o `make winres`, que gera
 `cmd/vpnmon-tray/rsrc_windows_amd64.syso` (manifest com comctl32 v6, que o
 walk exige, ícone e versão) com o `go-winres` v0.3.3 a partir de
 `cmd/vpnmon-tray/winres/winres.json`. Sem o `.syso` a bandeja compila, mas
-não abre. Os ícones em `assets/` saem de `go run ./tools/geniconos`.
+não abre. O `go run …@v0.3.3` baixa o go-winres pela rede na primeira vez
+(depois fica no cache de módulos do Go). Os ícones em `assets/` saem de
+`go run ./tools/geniconos`.
 ````
 
 e, no fim do arquivo, uma seção nova:
@@ -4968,7 +5565,7 @@ registra no `HKLM\...\Run`; até lá, abra-a à mão. Pelo menu dá para
 verificar, reconectar, pausar, desativar, remover e adicionar VPNs (a partir
 das entradas RAS de todos os usuários) e, em "Configurações…", editar alvos e
 intervalos. Credenciais continuam só pela CLI de administrador
-(`vpnmon-svc credential set "<vpn>"`).
+(`vpnmon-svc credential set "<vpn>" --user <usuário>`).
 ```
 
 Conferir o manifest embutido (opcional, mas foi feito na validação):
@@ -5015,9 +5612,13 @@ e uma entrada RAS de todos os usuários:
 6. Pausar 15 min / Retomar / Desativar / Ativar / Remover… (confirmação) pelo menu.
 7. `Abrir log` mostra o fim do log do serviço; fechar a janela não fecha a bandeja.
 8. `sc stop VPNMonitor`: ícone cinza "serviço parado" em até ~10 s; `sc start VPNMonitor`: volta sozinho.
-9. Credencial errada (`vpnmon-svc credential set "<vpn>"` com senha inválida): detalhe com "Credencial rejeitada" e a dica do
-   `credential set`; reiniciar o serviço dentro de 15 min mostra "Rejeitada antes do reinício do serviço; nova tentativa às HH:MM".
-10. "Sobre / versão" mostra a versão da bandeja e a do serviço; "Sair da bandeja" fecha só a bandeja.
+9. Credencial errada (`vpnmon-svc credential set "<vpn>" --user <usuário>` com senha inválida): detalhe com "Credencial rejeitada" e o
+   comando completo numa linha própria; reiniciar o serviço dentro de 15 min mostra "Rejeitada antes do reinício do serviço; nova
+   tentativa às HH:MM".
+10. Com a bandeja fechada, estragar o `config.json` (como administrador) e esperar a recarga; abrir a bandeja: o aviso "⚠ …" aparece no
+    menu. Derrubar duas VPNs de uma vez: um balão só ("2 VPNs caíram: …").
+11. Arrastar a bandeja para um monitor com outra escala (ou mudar a escala): o ícone continua nítido em até 1 s.
+12. "Sobre / versão" mostra a versão da bandeja e a do serviço; "Sair da bandeja" fecha só a bandeja.
 
 ## Autorrevisão
 
@@ -5029,4 +5630,4 @@ e uma entrada RAS de todos os usuários:
 - **Consistência de tipos:** `client.Event`/`Conn`/`ConnState` (Task 4) são os consumidos pelo `viewmodel.VM.Apply` (Task 8) e pela view
   (Task 11); `viewmodel.Command{Type, Payload}` (Task 9) é o que `Tray.call` passa a `Caller.Call`; os nomes de campo do formulário (Task 10)
   são os `FieldError.Field` do serviço (`config.ValidateVPN`).
-- **Review Focus:** os cinco itens têm teste na tarefa dona (Tasks 4, 5, 7, 8, 10 e 11).
+- **Review Focus:** os cinco itens têm teste na tarefa dona (Tasks 1, 4, 5, 7, 8 e 11).
