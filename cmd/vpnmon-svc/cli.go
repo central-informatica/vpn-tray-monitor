@@ -88,6 +88,10 @@ func (e usageError) Error() string { return e.msg }
 
 func runCLI(args []string, e env) int {
 	if len(args) == 0 {
+		// Sem argumentos e iniciado pelo SCM: o processo vira o serviço.
+		if ok, _ := e.isService(); ok {
+			return serviceMain(e)
+		}
 		fmt.Fprint(e.stderr, usage)
 		return 2
 	}
@@ -128,6 +132,8 @@ func dispatch(args []string, e env) error {
 		return errors.New("este comando exige um prompt de administrador")
 	}
 	switch cmd {
+	case "run":
+		return cmdRun(e)
 	case "install":
 		return cmdInstall(e)
 	case "uninstall":

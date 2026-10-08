@@ -214,26 +214,30 @@ func (o *Orchestrator) LogTail(maxBytes int) (string, error) {
 // gravando em dois passos): mantém a anterior, registra no log e no Event Log
 // e publica configStatus com o motivo. Lê sob applyMu: uma mutação pelo pipe
 // não passa entre a leitura e a aplicação. Depois de Stop não faz nada.
-func (o *Orchestrator) ReloadFromDisk() {
+//
+// Devolve só a falha de leitura do arquivo (violação de compartilhamento no
+// Windows, arquivo ausente...), sem registrá-la: quem observa o arquivo
+// repete com espera e, se persistir, chama ConfigUnreadable. Problemas de
+// conteúdo são tratados aqui e devolvem nil.
+func (o *Orchestrator) ReloadFromDisk() error {
 	o.applyMu.Lock()
 	defer o.applyMu.Unlock()
 	o.mu.Lock()
 	stopped := o.stopped
 	o.mu.Unlock()
 	if stopped {
-		return
+		return nil
 	}
 	data, err := os.ReadFile(o.opts.Paths.ConfigFile)
 	if err != nil {
-		o.opts.Log.Error("lendo config.json", "erro", err)
-		return
+		return fmt.Errorf("lendo config.json: %w", err)
 	}
 	h := hashBytes(data)
 	o.mu.Lock()
 	same := h == o.lastWritten && o.diskInvalid == nil
 	o.mu.Unlock()
 	if same {
-		return
+		return nil
 	}
 	c, err := config.Parse(data)
 	if err != nil {
@@ -247,7 +251,7 @@ func (o *Orchestrator) ReloadFromDisk() {
 			st.Fields = ve.Problems
 		}
 		o.bus.publish(ipc.MustMessage("", ipc.TypeConfigStatus, st))
-		return
+		return nil
 	}
 	o.mu.Lock()
 	o.lastWritten = h
@@ -256,9 +260,20 @@ func (o *Orchestrator) ReloadFromDisk() {
 	o.opts.Log.Info("config.json recarregado")
 	o.opts.OnGlobals(c)
 	if err := o.apply(c); err != nil {
-		return // Stop chegou durante a recarga
+		return nil // Stop chegou durante a recarga
 	}
 	o.bus.publish(ipc.MustMessage("", ipc.TypeConfigStatus, ipc.ConfigStatus{OK: true}))
+	return nil
+}
+
+// ConfigUnreadable avisa que config.json não pôde ser lido mesmo após as
+// novas tentativas da montagem: registra no log e no Event Log e publica
+// configStatus com o motivo. A config em uso continua valendo.
+func (o *Orchestrator) ConfigUnreadable(err error) {
+	msg := "não foi possível ler config.json; mantendo a config anterior: " + err.Error()
+	o.opts.Log.Error(msg)
+	o.opts.Events.Warning(msg)
+	o.bus.publish(ipc.MustMessage("", ipc.TypeConfigStatus, ipc.ConfigStatus{OK: false, Message: msg}))
 }
 
 // MarkWritten registra o hash do config.json carregado ou gravado fora do

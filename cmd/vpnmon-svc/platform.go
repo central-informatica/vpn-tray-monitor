@@ -15,11 +15,14 @@ import (
 // Platform reúne o acesso ao SO usado pelo serviço; no Windows vem de
 // realPlatform, nos testes de fakes.
 type Platform struct {
-	RAS      ras.Client
-	Pinger   icmp.Pinger
-	Net      netwatch.Watcher
-	DPAPI    dpapi.Protector
-	ACL      acl.Securer
+	RAS    ras.Client
+	Pinger icmp.Pinger
+	Net    netwatch.Watcher
+	DPAPI  dpapi.Protector
+	// ACL cria o endurecedor da pasta de dados com a função de log dada
+	// (no Windows, acl.NewWithLog): o log do serviço fica na própria pasta e
+	// ainda não está aberto quando a pasta é endurecida.
+	ACL      func(acl.Logf) acl.Securer
 	Listen   func() (net.Listener, error)
 	Events   logging.EventSink
 	ReadSeed config.SeedReader

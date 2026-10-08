@@ -45,7 +45,7 @@ func realPlatform() (Platform, error) {
 		ev = logging.NopSink{} // origem não registrada (sem install/MSI): segue sem Event Log
 	}
 	return Platform{
-		RAS: r, Pinger: icmp.New(), Net: nw, DPAPI: dpapi.New(), ACL: acl.New(),
+		RAS: r, Pinger: icmp.New(), Net: nw, DPAPI: dpapi.New(), ACL: acl.NewWithLog,
 		Listen: ipc.Listen, Events: ev, ReadSeed: config.ReadSeedRegistry,
 	}, nil
 }

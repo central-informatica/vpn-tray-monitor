@@ -1,6 +1,8 @@
 package service
 
 import (
+	"errors"
+	"io/fs"
 	"os"
 	"strings"
 	"testing"
@@ -400,5 +402,50 @@ func TestMutateRefusesUnreloadedManualEdit(t *testing.T) {
 	}
 	if c, err := config.Load(h.paths.ConfigFile); err != nil || len(c.VPNs) != 2 {
 		t.Fatalf("recriado: %+v %v", c, err)
+	}
+}
+
+// Falha de leitura (violação de compartilhamento no Windows, arquivo
+// ausente) volta para a montagem repetir; se persistir, ConfigUnreadable
+// avisa no log, no Event Log e por configStatus, sem mexer na config.
+func TestReloadReadErrorIsReturned(t *testing.T) {
+	w := &stubWorld{up: true, network: true}
+	h := newOrch(t, w, cfgWith(vpnNamed("Matriz")), config.State{})
+	h.waitView("Matriz", domain.Conectada)
+	sup := h.supOf("Matriz")
+	events, cancel := h.o.Subscribe()
+	defer cancel()
+	<-events // snapshot
+
+	_ = os.Remove(h.paths.ConfigFile)
+	err := h.o.ReloadFromDisk()
+	if err == nil || !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("erro de leitura deveria voltar: %v", err)
+	}
+	if h.supOf("Matriz") != sup {
+		t.Fatal("falha de leitura não pode mexer na config")
+	}
+	h.o.ConfigUnreadable(err)
+	var st ipc.ConfigStatus
+	got := false
+	for m := range drain(events) {
+		if m.Type == ipc.TypeConfigStatus {
+			got = ipc.DecodePayload(m.Payload, &st) == nil
+		}
+	}
+	if !got || st.OK || !strings.Contains(st.Message, "config.json") {
+		t.Fatalf("configStatus: %v %+v", got, st)
+	}
+	if ev := h.events.Snapshot(); len(ev) == 0 || ev[len(ev)-1].Level != "warning" {
+		t.Fatalf("Event Log: %+v", ev)
+	}
+	if h.supOf("Matriz") != sup {
+		t.Fatal("ConfigUnreadable não pode mexer na config")
+	}
+
+	// Conteúdo inválido é tratado dentro (configStatus) e não volta como erro.
+	_ = os.WriteFile(h.paths.ConfigFile, []byte("{"), 0o600)
+	if err := h.o.ReloadFromDisk(); err != nil {
+		t.Fatalf("conteúdo inválido não é erro de leitura: %v", err)
 	}
 }
