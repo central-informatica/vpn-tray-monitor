@@ -11,10 +11,15 @@ import (
 
 // Constantes do protocolo (§6.1, §6.2).
 const (
+	// EnvelopeVersion é o "v" fixo do envelope; só muda se o formato da linha mudar.
+	EnvelopeVersion = 1
+	// ProtocolVersion é a versão negociada no Hello.Protocol; um servidor que
+	// receba outra versão responde error{incompatible}.
 	ProtocolVersion = 1
-	MaxMessage      = 64 * 1024
-	MaxConns        = 32
-	PipeName        = `\\.\pipe\vpnmon`
+	// MaxMessage é o máximo de bytes de conteúdo de uma linha (sem o '\n').
+	MaxMessage = 64 * 1024
+	MaxConns   = 32
+	PipeName   = `\\.\pipe\vpnmon`
 	// PipeSDDL: Rede negada; SYSTEM e Administradores total; Usuários
 	// Interativos leitura e escrita. P = sem herança. Para IU a máscara é
 	// explícita (0x0012019b = FILE_GENERIC_READ | FILE_WRITE_DATA |
@@ -98,7 +103,7 @@ type (
 	}
 	PauseRequest struct {
 		VPN       string `json:"vpn"`
-		UntilUnix *int64 `json:"untilUnix"` // null = até retomar
+		UntilUnix *int64 `json:"untilUnix"` // null ou ausente = pausa indefinida (até retomar)
 	}
 	SetEnabledRequest struct {
 		VPN     string `json:"vpn"`
@@ -134,7 +139,7 @@ type (
 		State            string     `json:"state"`
 		SinceUnix        int64      `json:"sinceUnix"`
 		LastCheckUnix    int64      `json:"lastCheckUnix,omitempty"`
-		LatencyMs        int64      `json:"latencyMs,omitempty"`
+		LatencyMs        int64      `json:"latencyMs,omitempty"` // ausente = 0
 		Failures         int        `json:"failures"`
 		Attempt          int        `json:"attempt"`
 		NextAttemptUnix  int64      `json:"nextAttemptUnix,omitempty"`
@@ -176,7 +181,7 @@ type (
 
 // NewMessage monta uma mensagem com payload serializado.
 func NewMessage(id, typ string, payload any) (Message, error) {
-	m := Message{V: ProtocolVersion, ID: id, Type: typ}
+	m := Message{V: EnvelopeVersion, ID: id, Type: typ}
 	if payload != nil {
 		b, err := json.Marshal(payload)
 		if err != nil {
@@ -200,6 +205,8 @@ func MustMessage(id, typ string, payload any) Message {
 func ErrorMessage(id string, e *Error) Message { return MustMessage(id, TypeError, e) }
 
 // DecodePayload decodifica estritamente (campos desconhecidos são erro).
+// Observação: o encoding/json aceita chaves com caixa diferente e duplicadas
+// (vale a última); tolerado porque o pipe é local e autenticado por ACL.
 func DecodePayload(raw json.RawMessage, out any) error {
 	if len(raw) == 0 {
 		raw = json.RawMessage("{}")
