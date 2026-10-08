@@ -47,9 +47,3 @@ func (b *bus) publish(m ipc.Message) {
 		}
 	}
 }
-
-func (b *bus) count() int {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	return len(b.subs)
-}

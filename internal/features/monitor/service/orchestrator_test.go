@@ -12,6 +12,7 @@ import (
 	"github.com/guibsu/vpn-tray-monitor/internal/core/ipc"
 	"github.com/guibsu/vpn-tray-monitor/internal/core/logging"
 	"github.com/guibsu/vpn-tray-monitor/internal/core/platform/fake"
+	"github.com/guibsu/vpn-tray-monitor/internal/core/platform/ras"
 	"github.com/guibsu/vpn-tray-monitor/internal/features/monitor/adapters"
 	"github.com/guibsu/vpn-tray-monitor/internal/features/monitor/domain"
 	"github.com/guibsu/vpn-tray-monitor/internal/shared"
@@ -323,5 +324,155 @@ func TestStopDeadlineWithSeveralHungSupervisors(t *testing.T) {
 	}
 	if _, err := os.Stat(h.paths.StateFile); err != nil {
 		t.Fatal("state.json deveria ser gravado")
+	}
+}
+
+func (h *orchHarness) waitEvents(n int) []logging.RecordedEvent {
+	h.t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if ev := h.events.Snapshot(); len(ev) >= n {
+			return ev
+		}
+		time.Sleep(time.Millisecond)
+	}
+	h.t.Fatalf("esperava %d eventos: %+v", n, h.events.Snapshot())
+	return nil
+}
+
+func rejected() []adapters.DialOutcome {
+	return []adapters.DialOutcome{{Err: &domain.DialError{Class: ras.ClassCredencial, Code: 691, Message: "senha"}, Fingerprint: "fp1"}}
+}
+
+// panicInCredentialBlock leva a VPN a CredencialInvalida, provoca um panic
+// e espera a recriação ser agendada (com o estado de "reiniciando" publicado).
+func panicInCredentialBlock(t *testing.T, w *stubWorld) *orchHarness {
+	t.Helper()
+	h := newOrch(t, w, cfgWith(vpnNamed("Matriz")), config.State{})
+	h.waitView("Matriz", domain.CredencialInvalida)
+	w.set(func(w *stubWorld) { w.panicOn = "probe" })
+	if err := h.o.CheckNow("Matriz"); err != nil { // bloqueada só sonda o enlace
+		t.Fatal(err)
+	}
+	h.waitViewWhere("Matriz", func(v ipc.VPNView) bool {
+		return v.LastError != nil && v.LastError.Message == restartingText
+	})
+	var e *ipc.Error
+	if err := h.o.CheckNow("Matriz"); !asIPC(err, &e) || e.Code != ipc.CodeInternal {
+		t.Fatalf("comando durante a recriação: %v", err)
+	}
+	return h
+}
+
+func TestPanicInCredentialBlockDoesNotRedial(t *testing.T) {
+	w := &stubWorld{network: true, outcomes: rejected()}
+	h := panicInCredentialBlock(t, w)
+	h.clk.Advance(5 * time.Second)
+	h.waitViewWhere("Matriz", func(v ipc.VPNView) bool {
+		return v.State == string(domain.CredencialInvalida) && v.LastError != nil && v.LastError.Code == 691
+	})
+	for range 30 {
+		h.clk.Advance(time.Minute)
+	}
+	time.Sleep(50 * time.Millisecond)
+	if n := len(w.get().dials); n != 1 {
+		t.Fatalf("recriação não pode discar de novo com a credencial rejeitada: %d discagens", n)
+	}
+}
+
+func TestRestartInCredentialBlockSeesNewCredential(t *testing.T) {
+	w := &stubWorld{network: true, outcomes: rejected()}
+	h := panicInCredentialBlock(t, w)
+	w.set(func(w *stubWorld) { w.fp = "fp2" }) // cofre mudou durante a espera
+	h.clk.Advance(5 * time.Second)
+	h.waitView("Matriz", domain.Conectada)
+	if n := len(w.get().dials); n != 2 {
+		t.Fatalf("discagens = %d", n)
+	}
+}
+
+func TestRepeatedPanicsTripBreaker(t *testing.T) {
+	w := &stubWorld{up: true, network: true, probePanics: 3}
+	h := newOrch(t, w, cfgWith(vpnNamed("Matriz")), config.State{})
+	h.waitEvents(1)
+	if !h.clk.WaitForDeadline(5*time.Second, time.Second) {
+		t.Fatal("1ª recriação em 5 s")
+	}
+	h.clk.Advance(5 * time.Second)
+	h.waitEvents(2)
+	if !h.clk.WaitForDeadline(10*time.Second, time.Second) {
+		t.Fatal("2ª recriação em 10 s")
+	}
+	h.clk.Advance(10 * time.Second)
+	ev := h.waitEvents(4)
+	if len(ev) != 4 || ev[3].Level != "error" || !strings.Contains(ev[3].Msg, "suspenso") {
+		t.Fatalf("Event Log: %+v", ev)
+	}
+	h.waitViewWhere("Matriz", func(v ipc.VPNView) bool {
+		return v.State == string(domain.ErroConfig) && v.LastError != nil && v.LastError.Message == trippedText
+	})
+	probes := w.get().probes
+	h.clk.Advance(2 * time.Minute)
+	time.Sleep(50 * time.Millisecond)
+	if p := w.get().probes; p != probes {
+		t.Fatalf("supervisor recriado após o disjuntor: sondas %d → %d", probes, p)
+	}
+	if err := h.o.Reconnect("Matriz"); err != nil {
+		t.Fatalf("reconnect manual deveria recriar: %v", err)
+	}
+	h.waitView("Matriz", domain.Conectada)
+}
+
+func TestStopDuringReloadWithHungSupervisor(t *testing.T) {
+	gate := make(chan struct{})
+	defer close(gate)
+	w := &stubWorld{network: true, gate: gate} // sondas presas ignorando ctx
+	// Matriz muda na recarga (a recarga espera por ela); Filial fica e é a
+	// Stop que espera por ela: os prazos não podem se somar.
+	h := newOrchWith(t, w, cfgWith(vpnNamed("Matriz"), vpnNamed("Filial")), config.State{},
+		func(o *Options) { o.StopTimeout = time.Second })
+	deadline := time.Now().Add(2 * time.Second)
+	for w.get().probes < 2 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	changed := vpnNamed("Matriz")
+	changed.IntervalSeconds = 60
+	applied := make(chan struct{})
+	go func() {
+		defer close(applied)
+		h.o.applyMu.Lock()
+		defer h.o.applyMu.Unlock()
+		_ = h.o.apply(cfgWith(changed, vpnNamed("Filial"), vpnNamed("Backup")))
+	}()
+	for time.Now().Before(deadline) { // a recarga está esperando o supervisor preso
+		h.o.mu.Lock()
+		n := len(h.o.draining)
+		h.o.mu.Unlock()
+		if n > 0 {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+	start := time.Now()
+	h.o.Stop()
+	if d := time.Since(start); d > 1500*time.Millisecond {
+		t.Fatalf("Stop com recarga concorrente levou %s (prazo 1 s)", d)
+	}
+	<-applied
+	h.o.applyMu.Lock()
+	err := h.o.apply(cfgWith(vpnNamed("Backup")))
+	h.o.applyMu.Unlock()
+	if err == nil {
+		t.Fatal("apply após Stop deveria falhar")
+	}
+	h.o.mu.Lock()
+	n := len(h.o.sups)
+	h.o.mu.Unlock()
+	if n != 0 || len(h.o.Status().VPNs) != 0 {
+		t.Fatalf("supervisores relançados após Stop: %d", n)
+	}
+	var e *ipc.Error
+	if err := h.o.CheckNow("Matriz"); !asIPC(err, &e) || e.Code != ipc.CodeInternal {
+		t.Fatalf("comando após Stop: %v", err)
 	}
 }

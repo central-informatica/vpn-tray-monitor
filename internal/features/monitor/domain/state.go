@@ -124,6 +124,55 @@ func Initial(p Params, now time.Time, pause config.Pause) Status {
 	return s
 }
 
+// Restart é o estado ao recriar o supervisor de uma VPN que já rodava (após
+// panic), a partir do último estado publicado. Diferente de Initial, guarda a
+// memória que protege a conta no AD e o backoff (§4.7, §4.9): bloqueio,
+// impressão digital rejeitada, tentativas manuais, último erro, histórico de
+// reconexões, Attempt/NextAttempt, WasUp e DownSince. A operação em curso se
+// perdeu com o supervisor antigo (Op zera). pause vem do state.json.
+func Restart(last Status, p Params, now time.Time, pause config.Pause) Status {
+	if !p.Enabled {
+		return Initial(p, now, pause)
+	}
+	s := last
+	s.Op = OpNone
+	s.PausedUntil, s.PausedIndefinite = time.Time{}, false
+	set := func(st State) {
+		if s.State != st {
+			s.State, s.Since = st, now
+		}
+	}
+	switch {
+	case pause.Indefinite || pause.UntilUnix > now.Unix():
+		if isBlocked(s.State) {
+			s.Blocked = s.State
+		}
+		set(Pausada)
+		s.NextTick = time.Time{}
+		if pause.Indefinite {
+			s.PausedIndefinite = true
+		} else {
+			s.PausedUntil = time.Unix(pause.UntilUnix, 0)
+			s.NextTick = s.PausedUntil
+		}
+	case s.Blocked != "" || isBlocked(s.State):
+		// Bloqueado (ou reconexão manual de um bloqueado em curso): volta ao
+		// bloqueio, sem ciclo automático; só comando ou credencial nova saem dele.
+		if s.Blocked == "" {
+			s.Blocked = s.State
+		}
+		set(s.Blocked)
+		s.NextTick = time.Time{}
+	case s.State == Pausada || s.State == Desativada:
+		set(Desconhecido)
+		s.NextTick = now
+	default:
+		// Verifica já; a sonda de enlace respeita NextAttempt antes de discar.
+		s.NextTick = now
+	}
+	return s
+}
+
 // PauseRecord devolve a pausa a persistir (zero se não pausada).
 func (s Status) PauseRecord() config.Pause {
 	if s.State != Pausada {

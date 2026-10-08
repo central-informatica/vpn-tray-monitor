@@ -33,6 +33,9 @@ type stubWorld struct {
 	cancelled int
 	panicOn   string
 	probeErr  bool // Probe devolve erro (RAS inconsultável)
+	// probePanics: as próximas N sondas entram em pânico.
+	probePanics int
+	fp          string // impressão digital da credencial ("" = "fp1")
 }
 
 func (w *stubWorld) Probe(ctx context.Context, _ string) (adapters.LinkResult, error) {
@@ -40,6 +43,10 @@ func (w *stubWorld) Probe(ctx context.Context, _ string) (adapters.LinkResult, e
 	w.probes++
 	gate, p, perr := w.gate, w.panicOn, w.probeErr
 	w.panicOn = "" // só uma vez
+	if w.probePanics > 0 {
+		w.probePanics--
+		p = "probe"
+	}
 	w.mu.Unlock()
 	if p == "probe" {
 		panic("bug na sonda")
@@ -89,7 +96,14 @@ func (w *stubWorld) Dial(ctx context.Context, job adapters.DialJob) adapters.Dia
 	return out
 }
 
-func (w *stubWorld) Fingerprint(context.Context, string, string) string { return "fp1" }
+func (w *stubWorld) Fingerprint(context.Context, string, string) string {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.fp == "" {
+		return "fp1"
+	}
+	return w.fp
+}
 
 func (w *stubWorld) set(f func(w *stubWorld)) {
 	w.mu.Lock()

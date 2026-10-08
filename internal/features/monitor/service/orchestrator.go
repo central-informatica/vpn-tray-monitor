@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"runtime/debug"
 	"strings"
 	"sync"
 	"time"
@@ -51,12 +52,30 @@ type Options struct {
 	StopTimeout time.Duration
 }
 
+// Textos do estado publicado durante a recriação e com o disjuntor aberto.
+const (
+	restartingText = "reiniciando após falha interna"
+	trippedText    = "falha interna repetida; monitoramento desta VPN suspenso — veja o log"
+)
+
+// Disjuntor de panics (§4.9): breakerPanics panics seguidos, cada supervisor
+// vivendo menos que breakerLife, suspendem a VPN até recarga da config ou
+// reconexão manual. Um supervisor que viva breakerLife zera a contagem.
+const (
+	breakerPanics = 3
+	breakerLife   = 10 * time.Minute
+)
+
 type running struct {
 	vpn    config.VPN
-	sup    *Supervisor
+	sup    *Supervisor // nil enquanto recria após panic ou com o disjuntor aberto
 	last   domain.Status
 	cancel context.CancelFunc
 	done   chan struct{}
+	// tripped: disjuntor aberto, sem supervisor; revive recebe o pedido de
+	// recriação de um reconnect manual e devolve o supervisor novo.
+	tripped bool
+	revive  chan chan *Supervisor
 }
 
 // Orchestrator mantém um supervisor por VPN, distribui eventos e é o
@@ -67,11 +86,21 @@ type Orchestrator struct {
 	bus     *bus
 	applyMu sync.Mutex // serializa Apply e mutações de config
 
-	mu          sync.Mutex
-	ctx         context.Context
-	cfg         config.Config
-	state       config.State
-	sups        map[string]*running
+	// stopping fecha no início de Stop, antes de applyMu: uma recarga que
+	// esteja esperando supervisores desiste na hora.
+	stopping chan struct{}
+	stopOnce sync.Once
+
+	mu         sync.Mutex
+	ctx        context.Context
+	cancelRoot context.CancelFunc
+	stopped    bool
+	cfg        config.Config
+	state      config.State
+	sups       map[string]*running
+	// draining são os supervisores que uma recarga está parando; Stop
+	// espera por eles também.
+	draining    map[*running]struct{}
 	lastWritten string // hash do último config.json gravado pelo serviço
 	// diskInvalid é o problema do config.json em disco, enquanto ele estiver
 	// inválido; nesse estado as mudanças pelo pipe são recusadas para não
@@ -107,7 +136,12 @@ func New(opts Options, cfg config.Config, st config.State) *Orchestrator {
 		pauses[k] = p
 	}
 	st.Pauses = pauses
-	return &Orchestrator{opts: opts, queue: &DialQueue{}, bus: newBus(256), cfg: cfg, state: st, sups: map[string]*running{}}
+	return &Orchestrator{opts: opts, queue: &DialQueue{}, bus: newBus(256), stopping: make(chan struct{}),
+		cfg: cfg, state: st, sups: map[string]*running{}, draining: map[*running]struct{}{}}
+}
+
+func errStopping() error {
+	return &ipc.Error{Code: ipc.CodeInternal, Message: "serviço parando"}
 }
 
 // resumePeriod é o tique do detector de salto de relógio.
@@ -116,8 +150,8 @@ const resumePeriod = 5 * time.Second
 // Start sobe os supervisores e o detector de retomada. Não bloqueia.
 func (o *Orchestrator) Start(ctx context.Context) {
 	o.mu.Lock()
-	o.ctx = ctx
-	cfg := o.cfg
+	o.ctx, o.cancelRoot = context.WithCancel(ctx)
+	root, cfg := o.ctx, o.cfg
 	o.mu.Unlock()
 	// O detector registra o instante inicial e arma o tique aqui, antes de
 	// devolver: um salto de relógio logo após Start não se perde.
@@ -125,24 +159,43 @@ func (o *Orchestrator) Start(ctx context.Context) {
 	det.Observe(o.opts.Clock.Now())
 	tick := o.opts.Clock.NewTimer(resumePeriod)
 	o.applyMu.Lock()
-	o.apply(cfg)
+	err := o.apply(cfg)
 	o.applyMu.Unlock()
-	go o.watchResume(ctx, det, tick)
+	if err != nil {
+		tick.Stop()
+		return
+	}
+	go o.watchResume(root, det, tick)
 }
 
 // Stop encerra os supervisores (discagens em curso são desligadas), avisa
-// os assinantes e grava o estado. VPNs conectadas continuam de pé.
+// os assinantes e grava o estado. VPNs conectadas continuam de pé. O prazo
+// (StopTimeout) é absoluto, contado da entrada: uma recarga em curso desiste
+// ao ver stopping e não soma a espera dela à da parada.
 func (o *Orchestrator) Stop() {
+	deadline := time.Now().Add(o.opts.StopTimeout)
+	o.stopOnce.Do(func() {
+		o.mu.Lock()
+		o.stopped = true
+		if o.cancelRoot != nil {
+			o.cancelRoot() // supervisores e detector de retomada
+		}
+		o.mu.Unlock()
+		close(o.stopping)
+	})
 	o.applyMu.Lock()
 	defer o.applyMu.Unlock()
 	o.mu.Lock()
-	all := make([]*running, 0, len(o.sups))
+	all := make([]*running, 0, len(o.sups)+len(o.draining))
 	for k, r := range o.sups {
 		all = append(all, r)
 		delete(o.sups, k)
 	}
+	for r := range o.draining {
+		all = append(all, r)
+	}
 	o.mu.Unlock()
-	o.stopAll(all)
+	o.stopAll(all, deadline, nil)
 	o.bus.publish(ipc.MustMessage("", ipc.TypeServiceStopping, struct{}{}))
 	o.mu.Lock()
 	defer o.mu.Unlock()
@@ -152,34 +205,40 @@ func (o *Orchestrator) Stop() {
 }
 
 // stopAll cancela todos os supervisores de uma vez (param em paralelo, cada
-// um esperando suas operações por até StopWait) e espera no máximo
-// StopTimeout no total. Quem não voltar no prazo é abandonado (registrado no
-// log): o estado é gravado mesmo assim e atualizações tardias são ignoradas
-// por onUpdate.
-func (o *Orchestrator) stopAll(rs []*running) {
+// um esperando suas operações por até StopWait) e espera até deadline (tempo
+// real: é o SCM que está esperando). Quem não voltar no prazo é abandonado
+// (registrado no log): o estado é gravado mesmo assim e atualizações tardias
+// são ignoradas por onUpdate. Fechar abort encerra a espera na hora.
+func (o *Orchestrator) stopAll(rs []*running, deadline time.Time, abort <-chan struct{}) {
 	if len(rs) == 0 {
 		return
 	}
 	for _, r := range rs {
 		r.cancel()
 	}
-	// Prazo em tempo real (não o Clock injetável): é o SCM que está esperando.
 	// Um canal que fica fechado, e não um Timer (cujo C dispara uma vez só).
-	deadline, cancel := context.WithTimeout(context.Background(), o.opts.StopTimeout)
+	ctx, cancel := context.WithDeadline(context.Background(), deadline)
 	defer cancel()
 	for _, r := range rs {
 		select {
 		case <-r.done:
-		case <-deadline.Done():
+		case <-ctx.Done():
 			o.opts.Log.Warn("supervisor não parou no prazo; seguindo sem ele", "vpn", r.vpn.Name)
+		case <-abort:
+			return
 		}
 	}
 }
 
-// apply cria, remove ou reinicia só as VPNs cujo trecho mudou (§4.9).
-// Chamar com applyMu travado.
-func (o *Orchestrator) apply(cfg config.Config) {
+// apply cria, remove ou reinicia só as VPNs cujo trecho mudou (§4.9), além
+// das suspensas pelo disjuntor. Chamar com applyMu travado. Depois de Stop
+// não faz nada e devolve erro.
+func (o *Orchestrator) apply(cfg config.Config) error {
 	o.mu.Lock()
+	if o.stopped {
+		o.mu.Unlock()
+		return errStopping()
+	}
 	o.cfg = cfg
 	var stop []*running
 	var start []config.VPN
@@ -188,7 +247,7 @@ func (o *Orchestrator) apply(cfg config.Config) {
 		key := config.NameKey(v.Name)
 		keep[key] = true
 		if r, ok := o.sups[key]; ok {
-			if r.vpn == v {
+			if r.vpn == v && !r.tripped {
 				continue
 			}
 			stop = append(stop, r)
@@ -201,6 +260,9 @@ func (o *Orchestrator) apply(cfg config.Config) {
 			stop = append(stop, r)
 			delete(o.sups, key)
 		}
+	}
+	for _, r := range stop {
+		o.draining[r] = struct{}{}
 	}
 	pausesChanged := false
 	for key := range o.state.Pauses {
@@ -216,23 +278,32 @@ func (o *Orchestrator) apply(cfg config.Config) {
 	}
 	o.mu.Unlock()
 
-	o.stopAll(stop)
+	o.stopAll(stop, time.Now().Add(o.opts.StopTimeout), o.stopping)
 
 	o.mu.Lock()
+	defer o.mu.Unlock()
+	for _, r := range stop {
+		delete(o.draining, r)
+	}
+	if o.stopped {
+		return errStopping() // Stop chegou durante a espera: nada é relançado
+	}
 	for _, v := range start {
 		o.sups[config.NameKey(v.Name)] = o.launch(v)
 	}
-	snap := o.snapshotLocked()
-	o.mu.Unlock()
-	o.bus.publish(ipc.MustMessage("", ipc.TypeSnapshot, snap))
+	// Publicado com o.mu travado: nenhum vpnState novo passa na frente.
+	o.bus.publish(ipc.MustMessage("", ipc.TypeSnapshot, o.snapshotLocked()))
+	return nil
 }
 
-// launch sobe o supervisor sob recover; panic → log, Event Log e recriação
+// launch sobe o supervisor sob recover. Panic → log, Event Log e recriação
 // após RestartDelay (dobrando até 60 s; volta ao início se o supervisor
-// rodou mais de 1 min). Chamar com o.mu travado.
+// rodou mais de 1 min), a partir do último estado (domain.Restart: guarda
+// bloqueio e backoff). breakerPanics panics rápidos seguidos abrem o
+// disjuntor. Chamar com o.mu travado.
 func (o *Orchestrator) launch(v config.VPN) *running {
 	ctx, cancel := context.WithCancel(o.ctx)
-	r := &running{vpn: v, cancel: cancel, done: make(chan struct{})}
+	r := &running{vpn: v, cancel: cancel, done: make(chan struct{}), revive: make(chan chan *Supervisor)}
 	key := config.NameKey(v.Name)
 	log := logging.ForVPN(o.opts.Log, v.Name)
 	params := domain.ParamsFrom(v)
@@ -242,6 +313,9 @@ func (o *Orchestrator) launch(v config.VPN) *running {
 	go func() {
 		defer close(r.done)
 		delay := o.opts.RestartDelay
+		quick := 0                  // panics seguidos de supervisores de vida curta
+		recreated := false          // initial veio de Restart
+		var notify chan *Supervisor // reconnect manual esperando o supervisor novo
 		for {
 			var sup *Supervisor
 			sup = NewSupervisor(v, initial, Deps{
@@ -253,34 +327,116 @@ func (o *Orchestrator) launch(v config.VPN) *running {
 			o.mu.Lock()
 			r.sup = sup
 			o.mu.Unlock()
+			if notify != nil {
+				notify <- sup
+				notify = nil
+			}
+			if recreated && credentialBlocked(initial) {
+				// O cofre pode ter mudado durante a recriação: o aviso não
+				// pode se perder (o domínio ignora se a impressão não mudou).
+				go func() {
+					cctx, ccancel := context.WithTimeout(ctx, o.opts.CommandTimeout)
+					defer ccancel()
+					sup.CredentialChanged(cctx)
+				}()
+			}
 			started := o.opts.Clock.Now()
 			p := runRecovered(ctx, sup)
 			if p == nil || ctx.Err() != nil {
 				return
 			}
-			if o.opts.Clock.Now().Sub(started) > time.Minute {
+			lived := o.opts.Clock.Now().Sub(started)
+			if lived >= breakerLife {
+				quick = 0
+			}
+			quick++
+			if lived > time.Minute {
 				delay = o.opts.RestartDelay
 			}
-			// Arma a espera antes de registrar: quem vê o registro já
-			// encontra a recriação agendada.
-			t := o.opts.Clock.NewTimer(delay)
 			detail := fmt.Sprint(p)
-			log.Error("supervisor em pânico; recriando", "espera", delay, "panic", detail)
-			o.opts.Events.Error(fmt.Sprintf("VPN %s: supervisor em pânico, recriando em %s: %s",
-				v.Name, delay, firstLine(detail)))
-			select {
-			case <-ctx.Done():
-				t.Stop()
-				return
-			case <-t.C():
-			}
-			delay = min(delay*2, time.Minute)
 			o.mu.Lock()
-			initial = domain.Initial(params, o.opts.Clock.Now(), o.state.Pauses[key])
+			base := r.last // último estado do supervisor que caiu
+			r.sup = nil
 			o.mu.Unlock()
+
+			if quick >= breakerPanics {
+				log.Error("supervisor em pânico repetidamente; monitoramento suspenso", "panics", quick, "panic", detail)
+				o.mu.Lock()
+				r.tripped = true
+				r.last = trippedStatus(base, o.opts.Clock.Now())
+				o.publishLocked(r)
+				o.mu.Unlock()
+				o.opts.Events.Error(fmt.Sprintf("VPN %s: supervisor em pânico: %s", v.Name, firstLine(detail)))
+				o.opts.Events.Error(fmt.Sprintf("VPN %s: %s", v.Name, trippedText))
+				select {
+				case <-ctx.Done():
+					return
+				case notify = <-r.revive:
+				}
+				log.Info("reconexão manual: recriando o supervisor suspenso")
+				quick, delay = 0, o.opts.RestartDelay
+			} else {
+				// Arma a espera antes de registrar: quem vê o registro já
+				// encontra a recriação agendada.
+				t := o.opts.Clock.NewTimer(delay)
+				o.mu.Lock()
+				r.last = restartingStatus(base, o.opts.Clock.Now())
+				o.publishLocked(r)
+				o.mu.Unlock()
+				log.Error("supervisor em pânico; recriando", "espera", delay, "panic", detail)
+				o.opts.Events.Error(fmt.Sprintf("VPN %s: supervisor em pânico, recriando em %s: %s",
+					v.Name, delay, firstLine(detail)))
+				select {
+				case <-ctx.Done():
+					t.Stop()
+					return
+				case <-t.C():
+				}
+				delay = min(delay*2, time.Minute)
+			}
+			o.mu.Lock()
+			initial = domain.Restart(base, params, o.opts.Clock.Now(), o.state.Pauses[key])
+			r.last = initial
+			r.tripped = false
+			o.mu.Unlock()
+			recreated = true
 		}
 	}()
 	return r
+}
+
+func credentialBlocked(s domain.Status) bool {
+	return s.State == domain.CredencialInvalida || (s.State == domain.Pausada && s.Blocked == domain.CredencialInvalida)
+}
+
+// restartingStatus é o estado publicado enquanto o supervisor é recriado:
+// não mantém um "Conectada" que ninguém está verificando.
+func restartingStatus(base domain.Status, now time.Time) domain.Status {
+	s := base
+	s.Op = domain.OpNone
+	if s.State != domain.Pausada && s.State != domain.Desativada && s.State != domain.Desconhecido {
+		s.State, s.Since = domain.Desconhecido, now
+	}
+	s.NextAttempt = time.Time{}
+	s.LastErr = &domain.DialError{Class: ras.ClassTransitorio, Message: restartingText}
+	return s
+}
+
+// trippedStatus é o estado publicado com o disjuntor aberto.
+func trippedStatus(base domain.Status, now time.Time) domain.Status {
+	s := base
+	s.Op = domain.OpNone
+	if s.State != domain.ErroConfig {
+		s.State, s.Since = domain.ErroConfig, now
+	}
+	s.NextAttempt, s.NextTick = time.Time{}, time.Time{}
+	s.LastErr = &domain.DialError{Class: ras.ClassConfiguracao, Message: trippedText}
+	return s
+}
+
+// publishLocked publica o estado atual de r. Chamar com o.mu travado.
+func (o *Orchestrator) publishLocked(r *running) {
+	o.bus.publish(ipc.MustMessage("", ipc.TypeVPNState, ToView(r.vpn, r.last, o.opts.Clock.Now())))
 }
 
 // firstLine corta a pilha que acompanha o panic: o Event Log recebe só o
@@ -292,8 +448,14 @@ func firstLine(s string) string {
 	return s
 }
 
+// runRecovered roda o ator e devolve o panic dele (nil se saiu normalmente),
+// com a pilha do ator anexada.
 func runRecovered(ctx context.Context, sup *Supervisor) (p any) {
-	defer func() { p = recover() }()
+	defer func() {
+		if r := recover(); r != nil {
+			p = fmt.Sprintf("%v\n--- pilha do ator ---\n%s", r, debug.Stack())
+		}
+	}()
 	sup.Run(ctx)
 	return nil
 }
@@ -305,7 +467,7 @@ func (o *Orchestrator) onUpdate(r *running, sup *Supervisor, u Update) {
 	defer o.mu.Unlock()
 	key := config.NameKey(r.vpn.Name)
 	if o.sups[key] != r || r.sup != sup {
-		return // supervisor antigo (reiniciado ou removido)
+		return // supervisor antigo (reiniciado, em pânico ou removido)
 	}
 	r.last = u.Status
 	if u.PauseChanged {
@@ -319,8 +481,7 @@ func (o *Orchestrator) onUpdate(r *running, sup *Supervisor, u Update) {
 			o.opts.Log.Error("gravando state.json", "erro", err)
 		}
 	}
-	now := o.opts.Clock.Now()
-	o.bus.publish(ipc.MustMessage("", ipc.TypeVPNState, ToView(r.vpn, u.Status, now)))
+	o.publishLocked(r)
 	for _, n := range u.Notices {
 		o.bus.publish(ipc.MustMessage("", ipc.TypeNotice, ipc.NoticeEvent{VPN: r.vpn.Name, Kind: string(n.Kind), Text: n.Text}))
 	}
@@ -421,14 +582,24 @@ func minInterval(c config.Config) time.Duration {
 	return m
 }
 
-func (o *Orchestrator) find(name string) (*Supervisor, error) {
+// lookup acha a VPN e o supervisor dela. tripped diz se o disjuntor está
+// aberto (aí r vem junto do erro, para o reconnect manual recriar).
+func (o *Orchestrator) lookup(name string) (r *running, sup *Supervisor, tripped bool, err error) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
-	r, ok := o.sups[config.NameKey(name)]
-	if !ok || r.sup == nil {
-		return nil, &ipc.Error{Code: ipc.CodeNotFound, Message: fmt.Sprintf("VPN %q não existe", name)}
+	if o.stopped {
+		return nil, nil, false, errStopping()
 	}
-	return r.sup, nil
+	r, ok := o.sups[config.NameKey(name)]
+	switch {
+	case !ok:
+		return nil, nil, false, &ipc.Error{Code: ipc.CodeNotFound, Message: fmt.Sprintf("VPN %q não existe", name)}
+	case r.tripped:
+		return r, nil, true, &ipc.Error{Code: ipc.CodeInternal, Message: trippedText + "; use reconectar para retomar"}
+	case r.sup == nil:
+		return r, nil, false, &ipc.Error{Code: ipc.CodeInternal, Message: "VPN reiniciando; tente de novo"}
+	}
+	return r, r.sup, false, nil
 }
 
 func replyErr(r domain.Reply, err error) error {
@@ -450,8 +621,11 @@ func replyErr(r domain.Reply, err error) error {
 
 // command envia um comando a uma VPN com prazo (os métodos do supervisor
 // bloqueiam até o ator atender).
+
+// command envia um comando a uma VPN com prazo (os métodos do supervisor
+// bloqueiam até o ator atender).
 func (o *Orchestrator) command(name string, f func(*Supervisor, context.Context) (domain.Reply, error)) error {
-	s, err := o.find(name)
+	_, s, _, err := o.lookup(name)
 	if err != nil {
 		return err
 	}
@@ -465,9 +639,34 @@ func (o *Orchestrator) CheckNow(name string) error {
 	return o.command(name, (*Supervisor).CheckNow)
 }
 
-// Reconnect pede reconexão manual.
+// Reconnect pede reconexão manual. Com o disjuntor aberto, recria antes o
+// supervisor (a partir do último estado: a proteção de credencial vale).
 func (o *Orchestrator) Reconnect(name string) error {
-	return o.command(name, (*Supervisor).Reconnect)
+	r, s, tripped, err := o.lookup(name)
+	if err != nil && !tripped {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), o.opts.CommandTimeout)
+	defer cancel()
+	if s == nil {
+		unavailable := &ipc.Error{Code: ipc.CodeInternal, Message: "VPN reiniciando; tente de novo"}
+		ch := make(chan *Supervisor, 1)
+		select {
+		case r.revive <- ch:
+		case <-r.done:
+			return unavailable
+		case <-ctx.Done():
+			return unavailable
+		}
+		select {
+		case s = <-ch:
+		case <-r.done:
+			return unavailable
+		case <-ctx.Done():
+			return unavailable
+		}
+	}
+	return replyErr(s.Reconnect(ctx))
 }
 
 // Pause pausa até until (nil = até retomar).
