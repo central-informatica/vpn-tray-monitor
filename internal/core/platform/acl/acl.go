@@ -4,9 +4,19 @@
 package acl
 
 import (
+	"errors"
 	"sort"
 	"strings"
 )
+
+// ErrQuarantined é informativo: a raiz existente não era confiável (ponto de
+// reparse, não era pasta ou dono estranho) e foi renomeada para o lado; a
+// raiz foi recriada e o EnsureDir teve sucesso (changed=true). O chamador deve
+// logar e seguir (errors.Is), sem impedir a subida do serviço.
+var ErrQuarantined = errors.New("pasta de dados não confiável posta de lado e recriada")
+
+// Logf registra ocorrências do endurecimento (privilégios, links removidos…).
+type Logf func(format string, args ...any)
 
 // DirSDDL é o descritor da pasta. O dono (O:BA) importa: quem pré-cria a
 // pasta continua dono e, como dono, mantém WRITE_DAC mesmo fora da DACL.
@@ -17,7 +27,10 @@ var wantACEs = []string{"A;OICI;FA;;;BA", "A;OICI;FA;;;SY"}
 
 // Securer garante a segurança de uma pasta.
 type Securer interface {
-	// EnsureDir cria a pasta se preciso e corrige dono e DACL se divergirem.
+	// EnsureDir cria a pasta (já com o descritor) se preciso e corrige dono e DACL
+	// da raiz e de toda a árvore, sem seguir pontos de reparse (§5.1). Pode
+	// devolver changed=true com um erro que satisfaz errors.Is(err, ErrQuarantined):
+	// informativo, não fatal.
 	// changed=true quando precisou corrigir.
 	EnsureDir(path string) (changed bool, err error)
 }

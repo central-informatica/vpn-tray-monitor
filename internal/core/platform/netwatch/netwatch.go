@@ -11,7 +11,8 @@ import (
 
 // Watcher observa a rede.
 type Watcher interface {
-	// Changes recebe um aviso (agregado) por notificação bruta do SO.
+	// Changes entrega as notificações brutas do SO (coalescidas só se o
+	// consumidor atrasar); quem consome aplica Debounce. Um Watcher por processo.
 	Changes() <-chan struct{}
 	// HasPhysicalDefaultRoute diz se alguma interface física ativa tem rota padrão.
 	HasPhysicalDefaultRoute() (bool, error)

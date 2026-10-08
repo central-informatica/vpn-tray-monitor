@@ -57,4 +57,10 @@ func TestDebounce(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("aviso não chegou")
 	}
+	// A rajada inteira vale um único aviso.
+	select {
+	case <-out:
+		t.Fatal("segundo aviso para a mesma rajada")
+	case <-time.After(50 * time.Millisecond):
+	}
 }

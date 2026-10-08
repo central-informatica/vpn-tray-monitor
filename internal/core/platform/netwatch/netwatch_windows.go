@@ -3,6 +3,8 @@
 package netwatch
 
 import (
+	"errors"
+	"fmt"
 	"sync"
 	"unsafe"
 
@@ -10,7 +12,9 @@ import (
 )
 
 // rawChanges recebe os avisos dos callbacks. Callbacks do Go nunca são
-// liberados: criamos um só, na inicialização, e um único Watcher por processo.
+// liberados: criamos um só, na inicialização. Por isso só deve haver UM
+// Watcher por processo (todos compartilhariam este canal). Changes() entrega
+// notificações brutas; o consumidor aplica Debounce.
 var (
 	rawChanges     = make(chan struct{}, 1)
 	changeCallback = windows.NewCallback(func(callerCtx, row, notificationType uintptr) uintptr {
@@ -49,15 +53,26 @@ func (w *winWatcher) HasPhysicalDefaultRoute() (bool, error) {
 	}
 	defer windows.FreeMibTable(unsafe.Pointer(table))
 	var routes []Route
+	defaults, failed := 0, 0
+	var lastErr error
 	for _, r := range table.Rows() {
 		if r.DestinationPrefix.PrefixLength != 0 {
 			continue
 		}
+		defaults++
 		row := windows.MibIfRow2{InterfaceLuid: r.InterfaceLuid, InterfaceIndex: r.InterfaceIndex}
 		if err := windows.GetIfEntry2Ex(windows.MibIfEntryNormalWithoutStatistics, &row); err != nil {
+			if errors.Is(err, windows.ERROR_FILE_NOT_FOUND) {
+				continue // a interface sumiu entre as duas leituras
+			}
+			failed++
+			lastErr = err
 			continue
 		}
 		routes = append(routes, Route{PrefixLen: 0, IfType: row.Type, OperUp: row.OperStatus == windows.IfOperStatusUp})
+	}
+	if defaults > 0 && failed == defaults {
+		return false, fmt.Errorf("lendo as interfaces das rotas padrão: %w", lastErr)
 	}
 	return HasPhysicalDefault(routes), nil
 }
