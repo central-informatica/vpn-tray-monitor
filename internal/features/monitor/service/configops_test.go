@@ -545,6 +545,13 @@ func TestRemoveAddAfterWindowStartsFresh(t *testing.T) {
 		t.Fatal(err)
 	}
 	h.clk.Advance(domain.ManualRetryWindow + time.Second)
+	// O salto de 15 min chega ao tique de 5 s do watchResume como uma
+	// suspensão (PowerResume, verificação em +5 s). Se ele correr com o
+	// AddVPN, o supervisor novo fica esperando um tique que o relógio falso
+	// nunca dá: espera a passada terminar (ela rearma o tique) antes.
+	if !h.clk.WaitForDeadline(resumePeriod, time.Second) {
+		t.Fatal("watchResume não rearmou o tique após o salto")
+	}
 	if err := h.o.AddVPN(rawMatriz("Matriz")); err != nil {
 		t.Fatal(err)
 	}
