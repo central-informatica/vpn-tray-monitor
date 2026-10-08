@@ -66,6 +66,15 @@ const (
 	breakerLife   = 10 * time.Minute
 )
 
+// removedMemoryTTL é quanto a memória de credencial de uma VPN removida
+// vale após a remoção: a janela de proteção da §4.7.
+const removedMemoryTTL = domain.ManualRetryWindow
+
+type removedCred struct {
+	mem   domain.CredMemory
+	until time.Time
+}
+
 type running struct {
 	vpn config.VPN
 	sup *Supervisor // nil enquanto recria após panic ou com o disjuntor aberto
@@ -106,6 +115,10 @@ type Orchestrator struct {
 	// espera por eles também.
 	draining    map[*running]struct{}
 	lastWritten string // hash do último config.json gravado pelo serviço
+	// removed guarda, por NameKey, a memória de credencial rejeitada de uma
+	// VPN removida por removedMemoryTTL: remover e adicionar de novo com o
+	// mesmo nome não pode render uma discagem com a credencial rejeitada (§4.7).
+	removed map[string]removedCred
 	// diskInvalid é o problema do config.json em disco, enquanto ele estiver
 	// inválido; nesse estado as mudanças pelo pipe são recusadas para não
 	// sobrescrever a edição manual (ou o arquivo inteiro, se inválido desde a partida).
@@ -141,7 +154,8 @@ func New(opts Options, cfg config.Config, st config.State) *Orchestrator {
 	}
 	st.Pauses = pauses
 	return &Orchestrator{opts: opts, queue: &DialQueue{}, bus: newBus(256), stopping: make(chan struct{}),
-		cfg: cfg, state: st, sups: map[string]*running{}, draining: map[*running]struct{}{}}
+		cfg: cfg, state: st, sups: map[string]*running{}, draining: map[*running]struct{}{},
+		removed: map[string]removedCred{}}
 }
 
 func errStopping() error {
@@ -269,9 +283,11 @@ func (o *Orchestrator) apply(cfg config.Config) error {
 		}
 		start = append(start, launchReq{v: v, prev: r})
 	}
+	var gone []*running // removidas da config (não só reiniciadas)
 	for key, r := range o.sups {
 		if !keep[key] {
 			stop = append(stop, r)
+			gone = append(gone, r)
 			delete(o.sups, key)
 		}
 	}
@@ -306,6 +322,18 @@ func (o *Orchestrator) apply(cfg config.Config) error {
 	if o.stopped {
 		return errStopping() // Stop chegou durante a espera: nada é relançado
 	}
+	now := o.opts.Clock.Now()
+	for key, rm := range o.removed {
+		if !now.Before(rm.until) {
+			delete(o.removed, key)
+		}
+	}
+	for _, r := range gone {
+		// r.base já tem a última atualização do supervisor parado.
+		if m, ok := domain.CredMemoryOf(r.base); ok {
+			o.removed[config.NameKey(r.vpn.Name)] = removedCred{mem: m, until: now.Add(removedMemoryTTL)}
+		}
+	}
 	for _, l := range start {
 		o.sups[config.NameKey(l.v.Name)] = o.launch(l.v, l.prev)
 	}
@@ -330,7 +358,8 @@ func (o *Orchestrator) launch(v config.VPN, prev *running) *running {
 	log := logging.ForVPN(o.opts.Log, v.Name)
 	params := domain.ParamsFrom(v)
 	now := o.opts.Clock.Now()
-	quick := 0 // panics seguidos de supervisores de vida curta
+	quick := 0          // panics seguidos de supervisores de vida curta
+	remembered := false // VPN nova que herdou memória de credencial rejeitada
 	switch {
 	case prev != nil && prev.vpn == v: // só reabre o disjuntor
 		r.last = domain.Restart(prev.base, params, now, o.state.Pauses[key])
@@ -338,13 +367,19 @@ func (o *Orchestrator) launch(v config.VPN, prev *running) *running {
 		r.last = domain.Reconfigure(prev.base, domain.ParamsFrom(prev.vpn), params, now, o.state.Pauses[key])
 	default:
 		r.last = domain.Initial(params, now, o.state.Pauses[key])
+		if m, ok := o.credMemoryLocked(key, now); ok {
+			r.last = domain.WithCredMemory(r.last, m, now)
+			remembered = true
+		}
 	}
 	if prev != nil && prev.tripped {
 		quick = breakerPanics - 1
 	}
 	r.base = r.last
 	initial := r.last
-	recreated := prev != nil // initial pode vir de Restart
+	// initial pode vir de Restart ou de memória herdada: o aviso de
+	// credencial mudada é reenviado (o cofre pode ter mudado no meio).
+	recreated := prev != nil || remembered
 
 	go func() {
 		defer close(r.done)
@@ -448,6 +483,19 @@ func (o *Orchestrator) launch(v config.VPN, prev *running) *running {
 		}
 	}()
 	return r
+}
+
+// credMemoryLocked devolve a memória de credencial rejeitada que uma VPN
+// nova (sem supervisor anterior) herda: a de uma VPN removida com o mesmo
+// nome há menos de removedMemoryTTL. Chamar com o.mu travado.
+func (o *Orchestrator) credMemoryLocked(key string, now time.Time) (domain.CredMemory, bool) {
+	if rm, ok := o.removed[key]; ok {
+		delete(o.removed, key)
+		if now.Before(rm.until) {
+			return rm.mem, true
+		}
+	}
+	return domain.CredMemory{}, false
 }
 
 func credentialBlocked(s domain.Status) bool {

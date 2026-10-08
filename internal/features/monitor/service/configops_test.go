@@ -477,3 +477,71 @@ func TestSetEnabledOffOnKeepsCredentialBlock(t *testing.T) {
 		t.Fatalf("reconnect após a janela: %v", err)
 	}
 }
+
+func rawMatriz(name string) config.RawVPN {
+	return config.RawVPN{Name: name, RasEntry: "VPN Matriz", Check: &config.RawCheck{Kind: config.CheckPing, Host: "10.0.0.1"}}
+}
+
+// I1(b) Remover e adicionar de novo com o mesmo nome (sem diferença de
+// maiúsculas) dentro de 15 min não esquece a rejeição.
+func TestRemoveAddKeepsCredentialBlock(t *testing.T) {
+	w := &stubWorld{network: true, outcomes: rejected()}
+	h := newOrch(t, w, cfgWith(vpnNamed("Matriz")), config.State{})
+	h.waitView("Matriz", domain.CredencialInvalida)
+	if err := h.o.RemoveVPN("Matriz"); err != nil {
+		t.Fatal(err)
+	}
+	h.clk.Advance(10 * time.Minute)
+	if err := h.o.AddVPN(rawMatriz("MATRIZ")); err != nil {
+		t.Fatal(err)
+	}
+	h.waitViewWhere("MATRIZ", func(v ipc.VPNView) bool {
+		return v.State == string(domain.CredencialInvalida) && v.LastError != nil && v.LastError.Code == 691
+	})
+	for range 30 {
+		h.clk.Advance(time.Minute)
+	}
+	time.Sleep(50 * time.Millisecond)
+	if n := len(w.get().dials); n != 1 {
+		t.Fatalf("remover e adicionar discou com a credencial rejeitada: %d discagens", n)
+	}
+	var e *ipc.Error
+	if err := h.o.Reconnect("Matriz"); asIPC(err, &e) && e.Code == ipc.CodeCredentialRejected {
+		t.Fatalf("passada a janela, a reconexão manual é permitida: %v", err)
+	}
+}
+
+// A memória de uma VPN removida vale por 15 min após a remoção; depois, a
+// VPN adicionada de novo começa do zero.
+func TestRemoveAddAfterWindowStartsFresh(t *testing.T) {
+	w := &stubWorld{network: true, outcomes: rejected()}
+	h := newOrch(t, w, cfgWith(vpnNamed("Matriz")), config.State{})
+	h.waitView("Matriz", domain.CredencialInvalida)
+	if err := h.o.RemoveVPN("Matriz"); err != nil {
+		t.Fatal(err)
+	}
+	h.clk.Advance(domain.ManualRetryWindow + time.Second)
+	if err := h.o.AddVPN(rawMatriz("Matriz")); err != nil {
+		t.Fatal(err)
+	}
+	h.waitView("Matriz", domain.Conectada)
+	if n := len(w.get().dials); n != 2 {
+		t.Fatalf("discagens = %d", n)
+	}
+}
+
+// Credencial trocada enquanto a VPN estava removida: ao adicionar, a
+// impressão nova desbloqueia.
+func TestRemoveAddWithNewCredentialDials(t *testing.T) {
+	w := &stubWorld{network: true, outcomes: rejected()}
+	h := newOrch(t, w, cfgWith(vpnNamed("Matriz")), config.State{})
+	h.waitView("Matriz", domain.CredencialInvalida)
+	if err := h.o.RemoveVPN("Matriz"); err != nil {
+		t.Fatal(err)
+	}
+	w.set(func(w *stubWorld) { w.fp = "fp2" })
+	if err := h.o.AddVPN(rawMatriz("Matriz")); err != nil {
+		t.Fatal(err)
+	}
+	h.waitView("Matriz", domain.Conectada)
+}
