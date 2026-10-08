@@ -225,17 +225,17 @@ func (s *Server) handle(ctx context.Context, c net.Conn) {
 	_ = c.SetReadDeadline(time.Now().Add(s.HandshakeTimeout))
 	m, err := cn.codec.Read()
 	if err != nil {
+		// Primeira linha que nem é envelope: responde antes de fechar, para o
+		// cliente saber o motivo. Outros erros = cliente saiu ou prazo.
+		var de *DecodeError
+		if errors.Is(err, ErrTooLarge) || errors.As(err, &de) {
+			cn.send(ErrorMessage("", &Error{Code: CodeBadRequest, Message: "esperava hello: " + err.Error()}))
+			cn.flush()
+		}
 		return
 	}
-	var h Hello
-	if m.Type != TypeHello || DecodePayload(m.Payload, &h) != nil {
-		cn.send(ErrorMessage(m.ID, &Error{Code: CodeBadRequest, Message: "esperava hello"}))
-		cn.flush()
-		return
-	}
-	if h.Protocol != ProtocolVersion {
-		cn.send(ErrorMessage(m.ID, &Error{Code: CodeIncompatible,
-			Message: fmt.Sprintf("protocolo %d incompatível com o serviço (%d); atualize o VPN Monitor", h.Protocol, ProtocolVersion)}))
+	if herr := checkHello(m); herr != nil {
+		cn.send(ErrorMessage(m.ID, herr))
 		cn.flush()
 		return
 	}
@@ -292,6 +292,36 @@ func (s *Server) handle(ctx context.Context, c net.Conn) {
 		}
 		cn.send(s.dispatch(m))
 	}
+}
+
+// checkHello valida o hello. Um cliente de protocolo futuro pode mandar
+// campos que este servidor não conhece: se a decodificação estrita falhar, só
+// o campo protocol é lido, de forma tolerante, e uma versão diferente vira
+// incompatible (o cliente diz "atualize") em vez de bad_request.
+func checkHello(m Message) *Error {
+	if m.Type != TypeHello {
+		return &Error{Code: CodeBadRequest, Message: "esperava hello"}
+	}
+	var h Hello
+	if derr := DecodePayload(m.Payload, &h); derr != nil {
+		var loose struct {
+			Protocol *int `json:"protocol"`
+		}
+		if json.Unmarshal(m.Payload, &loose) != nil || loose.Protocol == nil || *loose.Protocol == ProtocolVersion {
+			msg := derr.Error()
+			var e *Error
+			if errors.As(derr, &e) {
+				msg = e.Message
+			}
+			return &Error{Code: CodeBadRequest, Message: "hello inválido: " + msg}
+		}
+		h.Protocol = *loose.Protocol
+	}
+	if h.Protocol != ProtocolVersion {
+		return &Error{Code: CodeIncompatible,
+			Message: fmt.Sprintf("protocolo %d incompatível com o serviço (%d); atualize o VPN Monitor", h.Protocol, ProtocolVersion)}
+	}
+	return nil
 }
 
 // flush espera o escritor gravar tudo o que foi enfileirado (até

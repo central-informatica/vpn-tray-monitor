@@ -459,3 +459,49 @@ func TestClientChecksServerProtocol(t *testing.T) {
 		t.Fatal("conexão deveria estar fechada")
 	}
 }
+
+// expectErrorID lê a resposta de erro, confere código e id, e o fechamento.
+func expectErrorID(t *testing.T, r *bufio.Reader, code, id string) {
+	t.Helper()
+	line, err := r.ReadString('\n')
+	if err != nil {
+		t.Fatalf("sem resposta: %v", err)
+	}
+	m, err := Decode([]byte(line))
+	var e Error
+	if err != nil || m.Type != TypeError || m.ID != id || DecodePayload(m.Payload, &e) != nil || e.Code != code {
+		t.Fatalf("esperava error{%s} com id %q, veio %q", code, id, line)
+	}
+	if _, err := r.ReadString('\n'); err == nil {
+		t.Fatal("conexão deveria ter sido fechada")
+	}
+}
+
+// Um cliente de protocolo futuro pode mandar no hello campos que este
+// servidor não conhece: a versão é lida de forma tolerante e a resposta é
+// incompatible (não bad_request), para a bandeja dizer "atualize".
+func TestServerHelloTolerantProtocolRead(t *testing.T) {
+	addr, _, _ := startServer(t, &fakeBackend{}, nil)
+	cases := []struct {
+		name, line, code, id string
+	}{
+		{"campo novo e versão futura", `{"v":1,"id":"h1","type":"hello","payload":{"protocol":2,"appVersion":"3.0","features":["x"]}}`, CodeIncompatible, "h1"},
+		{"campo novo com a versão atual", `{"v":1,"id":"h2","type":"hello","payload":{"protocol":1,"appVersion":"x","extra":true}}`, CodeBadRequest, "h2"},
+		{"protocolo com tipo errado", `{"v":1,"id":"h3","type":"hello","payload":{"protocol":"dois"}}`, CodeBadRequest, "h3"},
+		{"payload não é objeto", `{"v":1,"id":"h4","type":"hello","payload":[1]}`, CodeBadRequest, "h4"},
+		{"primeira linha não é JSON", `isso não é json`, CodeBadRequest, ""},
+		{"envelope com campo desconhecido", `{"v":1,"id":"h5","type":"hello","novo":1}`, CodeBadRequest, ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			c, r := rawConn(t, addr)
+			c.Write([]byte(tc.line + "\n"))
+			expectErrorID(t, r, tc.code, tc.id)
+		})
+	}
+	t.Run("primeira linha grande demais", func(t *testing.T) {
+		c, r := rawConn(t, addr)
+		go c.Write([]byte(strings.Repeat("a", MaxMessage+10) + "\n"))
+		expectErrorID(t, r, CodeBadRequest, "")
+	})
+}
