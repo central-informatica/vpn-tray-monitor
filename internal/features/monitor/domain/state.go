@@ -104,7 +104,9 @@ type Status struct {
 	LastCheck     time.Time
 	LastRTT       time.Duration
 	DownSince     time.Time
-	Reconnects    []time.Time
+	// WasUp marca que a VPN já esteve Conectada: sem isso não há aviso de queda.
+	WasUp      bool
+	Reconnects []time.Time
 }
 
 // Initial é o estado ao criar o supervisor. pause vem do state.json.

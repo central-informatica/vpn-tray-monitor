@@ -125,7 +125,8 @@ func (d *Decision) start(op Op) {
 // goDown entra num estado "fora do ar" e avisa a queda uma vez.
 func (d *Decision) goDown(st State, p Params, now time.Time) {
 	prev := d.Next.State
-	if (prev == Conectada || prev == Degradada) && d.Next.DownSince.IsZero() {
+	d.Next.Failures = 0
+	if (prev == Conectada || prev == Degradada) && d.Next.DownSince.IsZero() && d.Next.WasUp {
 		d.Next.DownSince = now
 		d.Notices = append(d.Notices, noticeDown(p.Name))
 	}
@@ -139,7 +140,17 @@ func (d *Decision) goUp(p Params, now time.Time) {
 		d.Next.DownSince = time.Time{}
 	}
 	d.Next.Failures = 0
+	d.Next.Attempt = 0
+	d.Next.NextAttempt = time.Time{}
+	d.Next.WasUp = true
 	d.set(Conectada, now)
+}
+
+// backoff conta uma tentativa e arma a próxima discagem permitida.
+func (d *Decision) backoff(p Params, env Env) {
+	d.Next.Attempt++
+	wait := shared.Backoff{Base: p.Interval, Max: p.MaxBackoff, Jitter: backoffJitter}.Delay(d.Next.Attempt, env.Rand)
+	d.Next.NextAttempt = env.Now.Add(wait)
 }
 
 func isBlocked(st State) bool { return st == CredencialInvalida || st == ErroConfig }
@@ -209,9 +220,19 @@ func onLink(d *Decision, in Input, p Params, env Env) {
 		d.goDown(Reconectando, p, now)
 		d.Next.NextTick = time.Time{}
 		d.start(OpDial)
-	case p.CheckKind == config.CheckLink || now.Before(s.GraceUntil):
+	case p.CheckKind == config.CheckLink:
 		d.Next.LastRTT = 0
 		d.goUp(p, now)
+		d.Next.NextTick = now.Add(p.Interval)
+	case now.Before(s.GraceUntil):
+		// Carência: não verifica alcance. Se há queda em aberto, o "voltou"
+		// e o reset do backoff esperam o primeiro alcance OK.
+		d.Next.LastRTT = 0
+		if s.DownSince.IsZero() {
+			d.goUp(p, now)
+		} else {
+			d.set(Conectada, now)
+		}
 		d.Next.NextTick = now.Add(p.Interval)
 	default:
 		d.start(OpProbeReach)
@@ -235,8 +256,15 @@ func onReach(d *Decision, in Input, p Params, env Env) {
 	d.Next.Failures++
 	if d.Next.Failures >= p.Failures {
 		// Túnel zumbi: enlace de pé, alvo mudo por N verificações.
-		d.Next.Failures = 0
 		d.goDown(Reconectando, p, now)
+		if now.Before(d.Next.NextAttempt) {
+			// Backoff em curso: espera, e a próxima falha de alcance
+			// já derruba de novo.
+			d.Next.Failures = p.Failures - 1
+			d.Next.NextTick = d.Next.NextAttempt
+			return
+		}
+		d.backoff(p, env)
 		d.Next.NextTick = time.Time{}
 		d.start(OpHangupDial)
 		return
@@ -255,14 +283,19 @@ func onDial(d *Decision, in Input, p Params, env Env) {
 	}
 	e := in.DialErr
 	if e == nil {
-		d.Next.Attempt = 0
-		d.Next.NextAttempt = time.Time{}
 		d.Next.GraceUntil = now.Add(p.Grace)
 		d.Next.LastErr = nil
 		d.Next.Blocked = ""
 		d.Next.LastRTT = 0
 		d.Next.Reconnects = appendRecent(d.Next.Reconnects, now)
-		d.goUp(p, now)
+		if p.CheckKind == config.CheckLink {
+			d.goUp(p, now)
+		} else {
+			// Discar não prova que o túnel passa tráfego: o "voltou" e o
+			// reset do backoff esperam o primeiro alcance OK.
+			d.Next.Failures = 0
+			d.set(Conectada, now)
+		}
 		d.Next.NextTick = now.Add(p.Interval)
 		return
 	}
@@ -285,10 +318,8 @@ func onDial(d *Decision, in Input, p Params, env Env) {
 		d.goDown(Reconectando, p, now)
 		d.Next.NextTick = now.Add(p.Interval)
 	default:
-		d.Next.Attempt++
-		wait := shared.Backoff{Base: p.Interval, Max: p.MaxBackoff, Jitter: backoffJitter}.Delay(d.Next.Attempt, env.Rand)
 		d.goDown(Reconectando, p, now)
-		d.Next.NextAttempt = now.Add(wait)
+		d.backoff(p, env)
 		d.Next.NextTick = d.Next.NextAttempt
 	}
 }
