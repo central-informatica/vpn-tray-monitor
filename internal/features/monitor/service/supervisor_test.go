@@ -35,6 +35,7 @@ type stubWorld struct {
 	probeErr  bool // Probe devolve erro (RAS inconsultável)
 	// probePanics: as próximas N sondas entram em pânico.
 	probePanics int
+	dialPanics  int    // as próximas N discagens entram em pânico (após registradas)
 	fp          string // impressão digital da credencial ("" = "fp1")
 }
 
@@ -76,7 +77,14 @@ func (w *stubWorld) Dial(ctx context.Context, job adapters.DialJob) adapters.Dia
 	if len(w.outcomes) > 0 {
 		out, w.outcomes = w.outcomes[0], w.outcomes[1:]
 	}
+	boom := w.dialPanics > 0
+	if boom {
+		w.dialPanics--
+	}
 	w.mu.Unlock()
+	if boom {
+		panic("bug no resultado da discagem")
+	}
 	if hang != nil {
 		<-hang
 		return adapters.DialOutcome{Cancelled: true}

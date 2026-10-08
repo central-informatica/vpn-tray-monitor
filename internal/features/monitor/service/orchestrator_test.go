@@ -354,14 +354,32 @@ func panicInCredentialBlock(t *testing.T, w *stubWorld) *orchHarness {
 	if err := h.o.CheckNow("Matriz"); err != nil { // bloqueada só sonda o enlace
 		t.Fatal(err)
 	}
-	h.waitViewWhere("Matriz", func(v ipc.VPNView) bool {
-		return v.LastError != nil && v.LastError.Message == restartingText
-	})
+	h.waitEvents(1) // registrado depois de agendar a recriação e publicar o estado
 	var e *ipc.Error
 	if err := h.o.CheckNow("Matriz"); !asIPC(err, &e) || e.Code != ipc.CodeInternal {
 		t.Fatalf("comando durante a recriação: %v", err)
 	}
+	// O bloqueio continua visível durante a recriação, com o erro real.
+	if v := h.o.Status().VPNs[0]; v.State != string(domain.CredencialInvalida) || v.LastError == nil || v.LastError.Code != 691 {
+		t.Fatalf("estado durante a recriação: %+v", v)
+	}
 	return h
+}
+
+// checkNowEventually repete CheckNow até o supervisor recriado atender.
+func (h *orchHarness) checkNowEventually(name string) {
+	h.t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		err := h.o.CheckNow(name)
+		if err == nil {
+			return
+		}
+		if time.Now().After(deadline) {
+			h.t.Fatalf("CheckNow(%s): %v", name, err)
+		}
+		time.Sleep(time.Millisecond)
+	}
 }
 
 func TestPanicInCredentialBlockDoesNotRedial(t *testing.T) {
@@ -475,4 +493,113 @@ func TestStopDuringReloadWithHungSupervisor(t *testing.T) {
 	if err := h.o.CheckNow("Matriz"); !asIPC(err, &e) || e.Code != ipc.CodeInternal {
 		t.Fatalf("comando após Stop: %v", err)
 	}
+}
+
+func TestReloadOfTrippedCredentialBlockDoesNotDial(t *testing.T) {
+	w := &stubWorld{network: true, outcomes: rejected()}
+	h := newOrch(t, w, cfgWith(vpnNamed("Matriz")), config.State{})
+	h.waitView("Matriz", domain.CredencialInvalida)
+	w.set(func(w *stubWorld) { w.probePanics = 3 })
+	h.checkNowEventually("Matriz") // panic 1
+	h.waitEvents(1)
+	h.clk.Advance(5 * time.Second)
+	h.checkNowEventually("Matriz") // panic 2
+	h.waitEvents(2)
+	h.clk.Advance(10 * time.Second)
+	h.checkNowEventually("Matriz") // panic 3 → disjuntor
+	h.waitViewWhere("Matriz", func(v ipc.VPNView) bool {
+		return v.LastError != nil && v.LastError.Message == trippedText
+	})
+	h.o.applyMu.Lock()
+	err := h.o.apply(cfgWith(vpnNamed("Matriz"))) // recarga sem mudança reabre
+	h.o.applyMu.Unlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.waitViewWhere("Matriz", func(v ipc.VPNView) bool {
+		return v.State == string(domain.CredencialInvalida) && v.LastError != nil && v.LastError.Code == 691
+	})
+	for range 30 {
+		h.clk.Advance(time.Minute)
+	}
+	time.Sleep(50 * time.Millisecond)
+	if n := len(w.get().dials); n != 1 {
+		t.Fatalf("recarga após o disjuntor discou com a credencial rejeitada: %d discagens", n)
+	}
+}
+
+func TestReconnectAfterTripReopensOnFirstPanic(t *testing.T) {
+	// O panic acontece no caminho do resultado da discagem: a rejeição
+	// nunca chega ao domínio, então só o disjuntor protege a conta.
+	w := &stubWorld{network: true, dialPanics: 100}
+	h := newOrch(t, w, cfgWith(vpnNamed("Matriz")), config.State{})
+	h.waitEvents(1)
+	h.clk.Advance(5 * time.Second)
+	h.waitEvents(2)
+	h.clk.Advance(10 * time.Second)
+	h.waitEvents(4) // 3º panic + disjuntor
+	dials := len(w.get().dials)
+	if dials != 3 {
+		t.Fatalf("discagens antes do disjuntor = %d", dials)
+	}
+	var e *ipc.Error
+	// O supervisor recriado pode discar sozinho (e cair) antes de atender:
+	// já reconectando ou indisponível também valem; o que importa é a contagem.
+	if err := h.o.Reconnect("Matriz"); err != nil && (!asIPC(err, &e) ||
+		(e.Code != ipc.CodeAlreadyReconnecting && e.Code != ipc.CodeInternal)) {
+		t.Fatalf("reconnect: %v", err)
+	}
+	ev := h.waitEvents(6) // panic + disjuntor de novo, sem agendar recriação
+	if !strings.Contains(ev[5].Msg, "suspenso") {
+		t.Fatalf("Event Log: %+v", ev)
+	}
+	for range 30 {
+		h.clk.Advance(time.Minute)
+	}
+	time.Sleep(50 * time.Millisecond)
+	if n := len(w.get().dials); n > dials+1 {
+		t.Fatalf("reconnect com o disjuntor aberto rendeu %d discagens", n-dials)
+	}
+	if n := len(h.events.Snapshot()); n != 6 {
+		t.Fatalf("eventos = %d", n)
+	}
+}
+
+func TestStopWaitsSupervisorsBeingReloaded(t *testing.T) {
+	gate := make(chan struct{})
+	w := &stubWorld{up: true, network: true, gate: gate} // sonda volta só quando gate fechar
+	h := newOrch(t, w, cfgWith(vpnNamed("Matriz")), config.State{})
+	deadline := time.Now().Add(2 * time.Second)
+	for w.get().probes == 0 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	h.o.mu.Lock()
+	old := h.o.sups["matriz"]
+	h.o.mu.Unlock()
+	changed := vpnNamed("Matriz")
+	changed.IntervalSeconds = 60
+	applied := make(chan struct{})
+	go func() {
+		defer close(applied)
+		h.o.applyMu.Lock()
+		defer h.o.applyMu.Unlock()
+		_ = h.o.apply(cfgWith(changed))
+	}()
+	for time.Now().Before(deadline) {
+		h.o.mu.Lock()
+		n := len(h.o.draining)
+		h.o.mu.Unlock()
+		if n > 0 {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+	time.AfterFunc(300*time.Millisecond, func() { close(gate) })
+	h.o.Stop()
+	select {
+	case <-old.done:
+	default:
+		t.Fatal("Stop voltou antes do supervisor que a recarga estava parando")
+	}
+	<-applied
 }
