@@ -246,8 +246,10 @@ func TestWindowsEnsureDirRootDeniesEveryone(t *testing.T) {
 	setDACL(t, dir, "D:P(D;OICI;FA;;;WD)", true)
 
 	changed, err := New().EnsureDir(dir)
-	// Administradores pode ler o descritor (dono) mas não listar a raiz.
-	side := quarantined(t, dir, ".: ilegível", changed, err)
+	// O processo elevado (Administradores) consegue ler o descritor e listar a
+	// pasta apesar do negar-Todos; a raiz vai para a quarentena porque a DACL
+	// diverge e há conteúdo (não por ilegível).
+	side := quarantined(t, dir, "DACL da raiz diverge e há conteúdo", changed, err)
 	// Devolve acesso ao diretório de lado para ler o conteúdo e permitir a limpeza.
 	t.Cleanup(func() { setDACL(t, side, "D:P(A;OICI;FA;;;BA)", true) })
 	setDACL(t, side, "D:P(A;OICI;FA;;;BA)", true)
