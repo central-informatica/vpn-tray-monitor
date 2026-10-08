@@ -30,7 +30,7 @@ type Platform struct {
 	// partida; nil = não registra.
 	TokenOwner func() (string, error)
 	// ReadFile lê config.json (partida, observador e recarga); nil =
-	// os.ReadFile. Os testes simulam com ele a violação de compartilhamento
+	// shared.ReadFileShared. Os testes simulam com ele a violação de compartilhamento
 	// do Windows, onde chmod não torna o arquivo ilegível.
 	ReadFile func(string) ([]byte, error)
 }

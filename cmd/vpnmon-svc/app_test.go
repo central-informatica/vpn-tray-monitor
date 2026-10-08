@@ -477,7 +477,11 @@ func TestServeConfigRemovedWarnsImmediately(t *testing.T) {
 	te.writeConfig(t, "Matriz")
 	ts := startService(t, te)
 	time.Sleep(500 * time.Millisecond) // linha de base do observador
-	_ = os.Remove(filepath.Join(te.dir, "config.json"))
+	// Sem retry: a leitura do serviço não pode impedir a remoção (no
+	// Windows, um handle sem FILE_SHARE_DELETE a fazia falhar às vezes).
+	if err := os.Remove(filepath.Join(te.dir, "config.json")); err != nil {
+		t.Fatalf("remoção com o serviço observando: %v", err)
+	}
 	waitFor(t, func() bool { return hasEvent(ts.events.Snapshot(), "warning", "config.json removido") })
 	b, _ := os.ReadFile(filepath.Join(te.dir, "logs", "vpnmon.log"))
 	if strings.Contains(string(b), "nova tentativa") {

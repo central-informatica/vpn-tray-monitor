@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"os"
 	"runtime/debug"
 	"strings"
 	"sync"
@@ -46,7 +45,7 @@ type Options struct {
 	// chamado antes de aplicar a config nova aos supervisores.
 	OnConfig func(config.Config)
 	// ReadFile lê config.json (recarga e conferência antes de gravar); nil =
-	// os.ReadFile.
+	// shared.ReadFileShared.
 	ReadFile func(string) ([]byte, error)
 	// RestartDelay é a espera antes de recriar um supervisor que entrou em
 	// pânico (dobra a cada repetição, até 60 s). Padrão 5 s.
@@ -146,7 +145,7 @@ func New(opts Options, cfg config.Config, st config.State) *Orchestrator {
 		opts.Clock = shared.RealClock{}
 	}
 	if opts.ReadFile == nil {
-		opts.ReadFile = os.ReadFile
+		opts.ReadFile = shared.ReadFileShared
 	}
 	if opts.RestartDelay == 0 {
 		opts.RestartDelay = 5 * time.Second

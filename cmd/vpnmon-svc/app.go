@@ -241,7 +241,9 @@ func serve(ctx context.Context, p Platform, l layout, clock shared.Clock, ready 
 
 	readFile := p.ReadFile
 	if readFile == nil {
-		readFile = os.ReadFile
+		// Sem FILE_SHARE_DELETE (os.ReadFile), a amostragem de 250 ms
+		// faria o admin falhar ao apagar ou trocar o arquivo por rename.
+		readFile = shared.ReadFileShared
 	}
 	cfg, cfgData, boot, cfgErr := loadStartupConfig(ctx, clock, readFile, l.ConfigFile, p.ReadSeed)
 	if ctx.Err() != nil {
