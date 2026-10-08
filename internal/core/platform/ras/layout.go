@@ -127,7 +127,6 @@ func (p DialParams) SetEntry(s string) error    { return putUTF16(p, dpOffEntryN
 func (p DialParams) Entry() string              { return getUTF16(p, dpOffEntryName, maxEntryName) }
 func (p DialParams) SetUser(s string) error     { return putUTF16(p, dpOffUserName, maxUserName, s) }
 func (p DialParams) User() string               { return getUTF16(p, dpOffUserName, maxUserName) }
-func (p DialParams) SetDomain(s string) error   { return putUTF16(p, dpOffDomain, maxDomain, s) }
 func (p DialParams) SetPassword(s string) error { return putUTF16(p, dpOffPassword, maxPassword, s) }
 
 // PasswordFingerprint é o hash do campo de senha como está (para a
