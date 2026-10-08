@@ -30,7 +30,7 @@
 Entradas e condições que o spec implica, que nenhum teste "natural" pegaria e que mais provavelmente atingiriam quem instala ou opera — cada uma já tem teste na tarefa dona:
 
 1. **Upgrade (ou desinstalação sem `PURGE`) apagando a ProgramData** — config, cofre e logs somem e a VPN para de discar após atualizar. A CA do `RemoveFolderEx` também roda na remoção da versão antiga durante o `MajorUpgrade`: a condição precisa de `NOT UPGRADINGPRODUCTCODE`. `TestPurgeOnlyOnExplicitUninstall` (Task 6) e passos 7–8 do e2e (Task 10: hash de `config.json` e do cofre iguais após upgrade e após desinstalar).
-2. **Instalação pelo MSI sem a política do SCM** — a tabela `MsiServiceConfigFailureActions` "is not working as expected" (Microsoft) e o WiX avisa (WIX1149): um serviço que cai nunca voltaria. A política vem do serviço, a cada partida. `TestServiceMainEnsuresSCMPolicy`, `TestPolicyValues`, `TestWindowsEnsurePolicyRepairs` (Task 5) e `Assert-ServicePolicy` no e2e (Task 10).
+2. **Instalação pelo MSI sem a política do SCM** — a tabela `MsiServiceConfigFailureActions` "is not working as expected" (Microsoft) e o WiX avisa (WIX1149): um serviço que cai nunca voltaria. A política vem do serviço, a cada partida. `TestServiceMainEnsuresSCMPolicy`, `TestServiceMainEnsuresPolicyBeforeStartupFails`, `TestPolicyValues`, `TestDiffPolicy`, `TestWindowsEnsurePolicyRepairs` (Task 5) e, no e2e (Task 10), `Assert-ServicePolicy` e o passo 6b (processo morto duas vezes volta em ~5 s e ~30 s — prova também que a contagem de falhas não é zerada).
 3. **ACL do MSI diferente da que o serviço exige** — o serviço poria a pasta recém-instalada em quarentena (`VPNMonitor.naoconfiavel-*`) e subiria vazio, sem o seed. `TestDataFolderACLMatchesService` (Task 6) e `Assert-DataAcl` no e2e (Task 10).
 4. **Nome de propriedade do seed divergente** entre MSI e serviço (ex.: `INTERVALO`) — a implantação por GPO/Intune "funciona" mas gera config vazia ou sem o intervalo, em silêncio. `TestSeedMatchesService` (Task 6) e `TestSeedValueNames` (Task 6).
 5. **Tag fora do formato ou acima dos limites** (`v1.0.0-beta.1`, `-rc.99`, `Z=655`) — o MSI sairia com uma `ProductVersion` que não atualiza a anterior (ou estoura 65535). `TestFromTagRejects` e `TestFromTagOrdersForMajorUpgrade` (Task 1); o `validate` da release (Task 11) usa a mesma função.
@@ -56,7 +56,9 @@ cliff.toml, Makefile, .gitignore, README.md, docs/TESTE-MANUAL.md
 
 ## Decisões tomadas neste plano (não estavam no spec)
 
-- **Política do SCM aplicada pelo próprio serviço, não pelo MSI.** O spec pede `ServiceConfigFailureActions` nativo, mas a Microsoft documenta na `MsiConfigureServices` que a `MsiServiceConfigFailureActions` "is not working as expected" (e sugere custom action com `sc.exe`); o WiX 5 emite WIX1149 para `ServiceConfigFailureActions` **e** para `ServiceConfig` (que gravaria `FailureActionsWhen` e `PreShutdownDelay`); há relato de erro 1939 (acesso negado com ação de reinício) que derrubaria a instalação. A menor solução sem custom action: o serviço chama `svc.EnsurePolicy()` a cada partida (mesmo `applyPolicy` do `vpnmon-svc install`: 5/30/60 s, reset 1 dia, falha sem crash, preshutdown 15 s); falha vira aviso no Event Log. O MSI fica só com `ServiceInstall`/`ServiceControl`, e o teste do instalador proíbe os elementos quebrados. Custo: um ajuste manual de recuperação feito por um admin é desfeito na próxima partida (documentado no README).
+- **Política do SCM aplicada pelo próprio serviço, não pelo MSI.** O spec pede `ServiceConfigFailureActions` nativo, mas a Microsoft documenta na `MsiConfigureServices` que a `MsiServiceConfigFailureActions` "is not working as expected" (e sugere custom action com `sc.exe`); o WiX 5 emite WIX1149 para `ServiceConfigFailureActions` **e** para `ServiceConfig` (que gravaria `FailureActionsWhen` e `PreShutdownDelay`); há relato de erro 1939 (acesso negado com ação de reinício) que derrubaria a instalação. O `util:ServiceConfig` também não serve: é custom action, aceita **uma só** espera de reinício para as três falhas e não grava a flag de falha sem crash nem o preshutdown. A menor solução sem custom action: o serviço chama `svc.EnsurePolicy()` **no topo** do `Run` do modo serviço, antes de qualquer passo que possa falhar (mesmo `applyPolicy` do `vpnmon-svc install`: 5/30/60 s, reset 1 dia, falha sem crash, preshutdown 15 s); falha vira aviso no Event Log. Como LocalSystem, o serviço tem `SERVICE_ALL_ACCESS` sobre si no descritor padrão do SCM. `applyPolicy` lê a config atual e **grava só o que diverge** (`svc.DiffPolicy`, função pura testada): regravar as ações de recuperação zeraria a contagem de falhas do SCM a cada partida, e a 2ª falha voltaria a esperar 5 s em vez de 30 s (o e2e mata o processo duas vezes e mede). O MSI fica só com `ServiceInstall`/`ServiceControl`, e o teste do instalador proíbe os elementos quebrados. Custo: um ajuste manual **diferente** feito por um admin no `services.msc` volta ao padrão na próxima partida (documentado no README).
+- **Restart Manager desligado no MSI** (`MSIRESTARTMANAGERCONTROL=Disable`, decisão do coordenador): a bandeja aberta nas sessões não é fechada no upgrade/desinstalação; o exe em uso é trocado na reinicialização e o msiexec devolve 3010 (README e roteiro manual §18/§22 marcam isso como "a confirmar").
+- **Fabricante "Central Informática" pendente de confirmação do usuário.** Fica numa só definição no `.wxs` (`<?define Manufacturer … ?>`, usada por `Package/@Manufacturer` e conferida pelo teste) e no `CompanyName` dos dois `winres.json`; trocar nos três lugares.
 - **go-winres num módulo só de ferramenta** (`tools/winres/go.mod` com `tool github.com/tc-hib/go-winres`, Go 1.24+): versão e hashes fixados num lugar só (Makefile e CI chamam `go tool -modfile=tools/winres/go.mod go-winres`), sem levar `golang.org/x/image` v0.12.0 e `urfave/cli` ao `go.mod` principal (nem ao govulncheck dos binários). O Dependabot olha os dois módulos.
 - **Exes compilados no Linux** (job `build`, ubuntu, com `make repro` provando a reprodutibilidade) e **MSI no Windows** (job `msi`); o spec punha o build no Windows. O Makefile é o mesmo do desenvolvimento e a release reaproveita o artefato `binarios` do CI chamado por `workflow_call`.
 - **`vpnmon-svc status --json`**: o e2e precisa ler estado, tentativa, próxima tentativa e classe do erro sem depender do texto da tabela.
@@ -66,17 +68,19 @@ cliff.toml, Makefile, .gitignore, README.md, docs/TESTE-MANUAL.md
 - **Identidade do MSI:** `Manufacturer="Central Informática"`, `Language="1046"` (pt-BR), `Codepage="1252"`, licença proprietária de uso interno (`installer/LICENCA.txt`), sem UI própria do WiX (só a básica do msiexec), `ARPNOMODIFY`.
 - **Requisito de SO** por `Launch` com o `CurrentBuildNumber` do registro (≥ 17763) e `VersionNT64` — o `VersionNT` do MSI é congelado em 603.
 - **`RemoveFolderEx` lê o caminho de `HKLM\SOFTWARE\VPNMonitor\DataDir`** (a CA roda antes de as pastas resolverem), e a condição é `PURGE=1 AND REMOVE~="ALL" AND NOT UPGRADINGPRODUCTCODE`.
-- **Atalho anunciado** (`Advertise="yes"`) no menu Iniciar: um atalho comum exigiria chave em HKCU (ICE38/ICE43) num pacote por máquina. Chave do componente do seed = `HKLM\SOFTWARE\VPNMonitor\Version` (os valores do seed podem vir vazios).
+- **Atalho anunciado** (`Advertise="yes"`) no menu Iniciar: um atalho comum exigiria chave em HKCU (ICE38/ICE43) num pacote por máquina, e a validação ICE só roda no Windows (não dá para provar antes do CI que o atalho comum passaria). Efeito colateral documentado no README e no roteiro manual: ao abrir o atalho, o Windows confere os componentes e, se algum sumiu (ex.: a origem do Event Log apagada), dispara um reparo com UAC; a bandeja aberta pelo `Run` não passa por isso. Chave do componente do seed = `HKLM\SOFTWARE\VPNMonitor\Version` (os valores do seed podem vir vazios). Num upgrade sem propriedades o seed é regravado vazio (apagar o `config.json` depois não re-semeia) — documentado no README.
 - **e2e:** entradas SSTP para 192.0.2.1; os dois MSIs (0.0.199/0.0.299) usam os mesmos exes e o upgrade é conferido pela `DisplayVersion`; o roteiro também confere downgrade recusado, reinstalação sobre a ProgramData existente, Event Log, `Run` e atalho. Logs (msiexec, serviço, Event Log, SCM) sempre no artefato `e2e-logs`.
 - **CI semanal** (`schedule`) e reutilizável (`workflow_call` com `version`); **CodeQL roda no Windows** (build manual), para analisar os `*_windows.go`.
 - **Assinatura:** `vars.SIGNING_ENABLED` (variável de repositório) lida no job `package` (environment `release`) e repassada ao `publish`; o `sign.ps1` lê `SIGN_DLIB`, `SIGN_DLIB_METADATA` e `SIGN_TIMESTAMP_URL` (vars do environment). SBOM gerado dos exes do zip portátil.
 - **Lint de scripts e workflows no CI:** PSScriptAnalyzer (exige BOM) e actionlint.
+- **Notas da release final cobrem desde a final anterior:** numa tag final o `release.yml` define `GIT_CLIFF__GIT__TAG_PATTERN` só com tags finais; sem isso, uma final no mesmo commit da última rc sairia com as notas da rc (ou vazias). Provado localmente com git-cliff 2.14.2 (rc → final no mesmo commit e em commit próprio).
+- **Risco aceito:** WiX 5.0.2 (`dotnet tool install --version`) e PSScriptAnalyzer 1.24.0 (`Install-Module -RequiredVersion`) ficam fixados só por versão, sem hash (os gerenciadores não oferecem verificação por hash simples); as actions são por SHA e as ferramentas Go pelo sumdb.
 
 ## Como verificar cada tarefa
 
 Cada tarefa traz o teste ou a checagem, o comando que deve falhar antes e passar depois, e o commit. Ao fim de cada tarefa: `make lint-go` limpo e `go test ./...` verde; a partir da Task 3, `make lint` (precisa do golangci-lint v2.14.0 no PATH ou `GOLANGCI=<caminho>`).
 
-O conteúdo deste plano já foi executado numa cópia do repositório (Linux, Go 1.26.5): testes Go falham antes e passam depois (com `-race`); `gofmt`, `go vet` e golangci-lint (linux e windows) limpos; `make repro` reproduzível; `govulncheck` sem vulnerabilidade alcançável; `actionlint` limpo nos dois workflows; PSScriptAnalyzer limpo em todos os scripts (pwsh 7.6); `git-cliff` gerou as notas com o `cliff.toml`; e o `Product.wxs` passou por **compilação e link do WiX 5.0.2** (no Linux o WiX para no bind, que exige `msi.dll` — ou seja, schema, atributos e referências estão certos). **Só o CI Windows prova:** o bind e a validação ICE do MSI, a instalação real (ACL com dono, Event Log, atalho anunciado, condição de SO, seed com valores vazios, `RemoveFolderEx`, upgrade/downgrade), `EnsurePolicy` no SCM real, o RAS do runner no e2e, o CodeQL no Windows e o `release.yml` inteiro (só passou no actionlint). Por isso a Task 7 (CI com `build` e `msi`) vem antes do e2e: **depois da Task 7, faça push e espere o job `msi` verde antes de seguir para a Task 10.**
+O conteúdo deste plano já foi executado numa cópia do repositório (Linux, Go 1.26.5): testes Go falham antes e passam depois (com `-race`); `gofmt`, `go vet` e golangci-lint (linux e windows) limpos; `make repro` reproduzível; `govulncheck` sem vulnerabilidade alcançável; `actionlint` limpo nos dois workflows; PSScriptAnalyzer limpo em todos os scripts (pwsh 7.6); `git-cliff` gerou as notas com o `cliff.toml`; e o `Product.wxs` passou por **compilação e link do WiX 5.0.2** (no Linux o WiX para no bind, que exige `msi.dll` — ou seja, schema, atributos e referências estão certos). **Só o CI Windows prova:** o bind e a validação ICE do MSI, a instalação real (ACL com dono, Event Log, atalho anunciado, condição de SO, seed com valores vazios, `RemoveFolderEx`, upgrade/downgrade), `EnsurePolicy` no SCM real, o RAS do runner no e2e, o CodeQL no Windows, a recuperação real do SCM (passo 6b), o Restart Manager desligado com a bandeja aberta (só no roteiro manual) e o `release.yml` inteiro (só passou no actionlint; o `GIT_CLIFF__GIT__TAG_PATTERN` foi provado com o git-cliff local, não com a action). Por isso a Task 7 (CI com `build` e `msi`) vem antes do e2e: **depois da Task 7, faça push e espere o job `msi` verde antes de seguir para a Task 10.**
 
 ---
 
@@ -1176,7 +1180,7 @@ git commit -m "build: recursos do vpnmon-svc, go-winres fixado em módulo de fer
 
 **Interfaces:**
 - Consumes: `svc.Install`/`installNamed` (Marco A).
-- Produces: `svc.PreshutdownTimeout = 15 * time.Second`, `svc.RecoveryReset = 24 * time.Hour`, `func svc.RecoveryDelays() []time.Duration` (5 s, 30 s, 60 s; cópia nova a cada chamada), `func svc.Dependencies() []string` (`["RasMan"]`), `func svc.EnsurePolicy() error` (Windows: reaplica ao serviço `VPNMonitor`; fora: `platform.ErrNotSupported`); `env.ensurePolicy func() error` no `vpnmon-svc`, chamado uma vez na partida como serviço (falha → `Events.Warning`). A Task 6 usa `RecoveryDelays`/`Dependencies` no teste do instalador.
+- Produces: `svc.PreshutdownTimeout = 15 * time.Second`, `svc.RecoveryReset = 24 * time.Hour`, `func svc.RecoveryDelays() []time.Duration` (5 s, 30 s, 60 s; cópia nova a cada chamada), `func svc.Dependencies() []string` (`["RasMan"]`), `type svc.RecoveryStep struct { Restart bool; Delay time.Duration }`, `type svc.Policy struct { Actions []RecoveryStep; Reset time.Duration; NonCrash bool; Preshutdown time.Duration }`, `func svc.WantedPolicy() Policy`, `type svc.PolicyChanges struct { Recovery, NonCrash, Preshutdown bool }` com `Any() bool`, `func svc.DiffPolicy(cur, want Policy) PolicyChanges`; `func svc.EnsurePolicy() error` (Windows: lê a config do serviço `VPNMonitor` e grava só o que diverge; fora: `platform.ErrNotSupported`); `env.ensurePolicy func() error` no `vpnmon-svc`, chamado uma vez **no topo** do `Run` do modo serviço (falha → `Events.Warning` assim que a plataforma existir). A Task 6 usa `RecoveryDelays`/`Dependencies` no teste do instalador.
 
 - [ ] **Step 1: Escrever os testes que falham**
 
@@ -1201,6 +1205,39 @@ func TestPolicyValues(t *testing.T) {
 	Dependencies()[0] = "x"
 	if RecoveryDelays()[0] != 5*time.Second || Dependencies()[0] != "RasMan" {
 		t.Fatal("política mutável por quem chama")
+	}
+}
+
+func TestDiffPolicy(t *testing.T) {
+	want := WantedPolicy()
+	if len(want.Actions) != 3 || !want.Actions[0].Restart || want.Actions[2].Delay != 60*time.Second ||
+		want.Reset != 24*time.Hour || !want.NonCrash || want.Preshutdown != 15*time.Second {
+		t.Fatalf("WantedPolicy %+v", want)
+	}
+	mod := func(f func(*Policy)) Policy {
+		p := WantedPolicy()
+		f(&p)
+		return p
+	}
+	cases := []struct {
+		name string
+		cur  Policy
+		want PolicyChanges
+	}{
+		{"igual: nada a gravar (não zera a contagem de falhas)", WantedPolicy(), PolicyChanges{}},
+		{"serviço recém-registrado (MSI)", Policy{}, PolicyChanges{true, true, true}},
+		{"espera diferente", mod(func(p *Policy) { p.Actions[1].Delay = 10 * time.Second }), PolicyChanges{Recovery: true}},
+		{"ação que não reinicia", mod(func(p *Policy) { p.Actions[2].Restart = false }), PolicyChanges{Recovery: true}},
+		{"ação a mais", mod(func(p *Policy) { p.Actions = append(p.Actions, RecoveryStep{true, time.Minute}) }), PolicyChanges{Recovery: true}},
+		{"reset diferente", mod(func(p *Policy) { p.Reset = 0 }), PolicyChanges{Recovery: true}},
+		{"sem falha sem crash", mod(func(p *Policy) { p.NonCrash = false }), PolicyChanges{NonCrash: true}},
+		{"preshutdown padrão (3 min)", mod(func(p *Policy) { p.Preshutdown = 3 * time.Minute }), PolicyChanges{Preshutdown: true}},
+	}
+	for _, c := range cases {
+		got := DiffPolicy(c.cur, WantedPolicy())
+		if got != c.want || got.Any() != (c.want != PolicyChanges{}) {
+			t.Errorf("%s: %+v, quer %+v", c.name, got, c.want)
+		}
 	}
 }
 ```
@@ -1273,6 +1310,9 @@ func TestWindowsEnsurePolicyRepairs(t *testing.T) {
 	if ms := preshutdownMs(t, s); ms != uint32(PreshutdownTimeout/time.Millisecond) {
 		t.Fatalf("preshutdown %d ms", ms)
 	}
+	if ch := DiffPolicy(readPolicy(s), WantedPolicy()); ch.Any() {
+		t.Fatalf("política lida diverge depois do EnsurePolicy: %+v", ch)
+	}
 	if err := ensurePolicyNamed("VPNMonitorInexistente"); err == nil {
 		t.Fatal("serviço inexistente deveria dar erro")
 	}
@@ -1337,12 +1377,31 @@ func TestServiceMainEnsuresSCMPolicy(t *testing.T) {
 		t.Fatalf("Event Log: %+v", events.Snapshot())
 	}
 }
+
+// A política vem antes de qualquer outra coisa: com a plataforma falhando
+// (o Run sai com erro e o SCM precisa da recuperação), ela já foi aplicada.
+func TestServiceMainEnsuresPolicyBeforeStartupFails(t *testing.T) {
+	te := newTestEnv(t)
+	te.isService = func() (bool, error) { return true, nil }
+	te.platform = func() (Platform, error) { return Platform{}, errors.New("RAS indisponível") }
+	var calls atomic.Int32
+	te.ensurePolicy = func() error { calls.Add(1); return nil }
+	var code uint32
+	te.runService = func(h svc.Hooks) error {
+		code = svc.Loop(h, make(chan svc.Request), func(svc.State) {})
+		return nil
+	}
+	te.run()
+	if code == 0 || calls.Load() != 1 {
+		t.Fatalf("laço %d, EnsurePolicy chamado %d vezes", code, calls.Load())
+	}
+}
 ```
 
 - [ ] **Step 2: Rodar e ver falhar**
 
 Run: `go test ./internal/core/platform/svc/ ./cmd/vpnmon-svc/`
-Expected: FAIL de compilação — `undefined: RecoveryDelays`, `undefined: RecoveryReset`, `undefined: PreshutdownTimeout`, `undefined: Dependencies`; e `te.ensurePolicy undefined (type *testEnv has no field or method ensurePolicy)`.
+Expected: FAIL de compilação — `undefined: RecoveryDelays`, `undefined: RecoveryReset`, `undefined: PreshutdownTimeout`, `undefined: Dependencies`, `undefined: WantedPolicy`, `undefined: DiffPolicy`, `undefined: PolicyChanges`, `undefined: RecoveryStep`; e `te.ensurePolicy undefined (type *testEnv has no field or method ensurePolicy)`.
 
 - [ ] **Step 3: Implementar**
 
@@ -1367,6 +1426,56 @@ func RecoveryDelays() []time.Duration {
 
 // Dependencies são os serviços de que o VPNMonitor depende.
 func Dependencies() []string { return []string{"RasMan"} }
+
+// RecoveryStep é uma ação de recuperação do SCM: reiniciar (ou outra coisa)
+// após uma espera.
+type RecoveryStep struct {
+	Restart bool
+	Delay   time.Duration
+}
+
+// Policy é a parte da configuração do serviço no SCM que o VPN Monitor
+// controla.
+type Policy struct {
+	Actions     []RecoveryStep
+	Reset       time.Duration
+	NonCrash    bool // FailureActionsOnNonCrashFailures
+	Preshutdown time.Duration
+}
+
+// WantedPolicy é a política do spec (§9).
+func WantedPolicy() Policy {
+	var steps []RecoveryStep
+	for _, d := range RecoveryDelays() {
+		steps = append(steps, RecoveryStep{Restart: true, Delay: d})
+	}
+	return Policy{Actions: steps, Reset: RecoveryReset, NonCrash: true, Preshutdown: PreshutdownTimeout}
+}
+
+// PolicyChanges diz o que precisa ser gravado. Ações e período de reset vão
+// juntos (uma só chamada ao SCM, SERVICE_CONFIG_FAILURE_ACTIONS).
+type PolicyChanges struct {
+	Recovery, NonCrash, Preshutdown bool
+}
+
+// Any diz se há algo a gravar.
+func (c PolicyChanges) Any() bool { return c.Recovery || c.NonCrash || c.Preshutdown }
+
+// DiffPolicy compara a política lida do SCM com a desejada. Só o que diverge
+// é regravado: regravar as ações de recuperação zera a contagem de falhas do
+// SCM, e o serviço reaplica a política a cada partida (inclusive logo depois
+// de uma falha, quando a contagem decide a próxima espera).
+func DiffPolicy(cur, want Policy) PolicyChanges {
+	recovery := cur.Reset != want.Reset || len(cur.Actions) != len(want.Actions)
+	for i := 0; !recovery && i < len(want.Actions); i++ {
+		recovery = cur.Actions[i] != want.Actions[i]
+	}
+	return PolicyChanges{
+		Recovery:    recovery,
+		NonCrash:    cur.NonCrash != want.NonCrash,
+		Preshutdown: cur.Preshutdown != want.Preshutdown,
+	}
+}
 ```
 
 `internal/core/platform/svc/svc_other.go` — acrescente, abaixo de `func Uninstall() …`:
@@ -1419,35 +1528,70 @@ por
 
 (o registro do Event Log que vem depois fica igual).
 
-4. Logo antes de `// Uninstall para o serviço (sem derrubar VPNs) e remove o registro.`, acrescente:
+4. Logo antes de `// Uninstall para o serviço (sem derrubar VPNs) e remove o registro.`, acrescente (`readPolicy`, `applyPolicy` que grava só o que diverge, `EnsurePolicy`):
 
 ```go
-// applyPolicy grava a política do SCM: recuperação (RecoveryDelays, zerando
-// em RecoveryReset), também quando o serviço para com erro sem crash, e o
-// prazo de preshutdown. Idempotente.
-func applyPolicy(s *mgr.Service) error {
-	var actions []mgr.RecoveryAction
-	for _, d := range RecoveryDelays() {
-		actions = append(actions, mgr.RecoveryAction{Type: mgr.ServiceRestart, Delay: d})
+// readPolicy lê a política atual; o que não der para ler fica zerado (e
+// por isso diverge e é regravado).
+func readPolicy(s *mgr.Service) Policy {
+	var p Policy
+	if acts, err := s.RecoveryActions(); err == nil {
+		for _, a := range acts {
+			p.Actions = append(p.Actions, RecoveryStep{Restart: a.Type == mgr.ServiceRestart, Delay: a.Delay})
+		}
 	}
-	if err := s.SetRecoveryActions(actions, uint32(RecoveryReset.Seconds())); err != nil {
-		return fmt.Errorf("configurando recuperação: %w", err)
+	if rp, err := s.ResetPeriod(); err == nil {
+		p.Reset = time.Duration(rp) * time.Second
+	}
+	if f, err := s.RecoveryActionsOnNonCrashFailures(); err == nil {
+		p.NonCrash = f
+	}
+	var info struct{ PreshutdownTimeout uint32 }
+	var needed uint32
+	if err := windows.QueryServiceConfig2(s.Handle, windows.SERVICE_CONFIG_PRESHUTDOWN_INFO,
+		(*byte)(unsafe.Pointer(&info)), uint32(unsafe.Sizeof(info)), &needed); err == nil {
+		p.Preshutdown = time.Duration(info.PreshutdownTimeout) * time.Millisecond
+	}
+	return p
+}
+
+// applyPolicy grava a política do SCM (WantedPolicy): recuperação, também
+// quando o serviço para com erro sem crash, e o prazo de preshutdown. Só
+// grava o que diverge (DiffPolicy): regravar a recuperação zeraria a
+// contagem de falhas do SCM a cada partida.
+func applyPolicy(s *mgr.Service) error {
+	want := WantedPolicy()
+	ch := DiffPolicy(readPolicy(s), want)
+	if ch.Recovery {
+		var actions []mgr.RecoveryAction
+		for _, a := range want.Actions {
+			actions = append(actions, mgr.RecoveryAction{Type: mgr.ServiceRestart, Delay: a.Delay})
+		}
+		if err := s.SetRecoveryActions(actions, uint32(want.Reset.Seconds())); err != nil {
+			return fmt.Errorf("configurando recuperação: %w", err)
+		}
 	}
 	// Run que termina com erro limpo vira SERVICE_STOPPED com código de saída,
 	// não crash: sem este flag a recuperação não dispararia.
-	if err := s.SetRecoveryActionsOnNonCrashFailures(true); err != nil {
-		return fmt.Errorf("configurando recuperação em falhas sem crash: %w", err)
+	if ch.NonCrash {
+		if err := s.SetRecoveryActionsOnNonCrashFailures(want.NonCrash); err != nil {
+			return fmt.Errorf("configurando recuperação em falhas sem crash: %w", err)
+		}
 	}
-	info := struct{ PreshutdownTimeout uint32 }{uint32(PreshutdownTimeout / time.Millisecond)}
-	if err := windows.ChangeServiceConfig2(s.Handle, windows.SERVICE_CONFIG_PRESHUTDOWN_INFO,
-		(*byte)(unsafe.Pointer(&info))); err != nil {
-		return fmt.Errorf("configurando tempo de preshutdown: %w", err)
+	if ch.Preshutdown {
+		info := struct{ PreshutdownTimeout uint32 }{uint32(want.Preshutdown / time.Millisecond)}
+		if err := windows.ChangeServiceConfig2(s.Handle, windows.SERVICE_CONFIG_PRESHUTDOWN_INFO,
+			(*byte)(unsafe.Pointer(&info))); err != nil {
+			return fmt.Errorf("configurando tempo de preshutdown: %w", err)
+		}
 	}
 	return nil
 }
 
-// EnsurePolicy reaplica a política do SCM ao serviço VPNMonitor. O serviço
-// chama na partida: é o que garante a política numa instalação pelo MSI.
+// EnsurePolicy reaplica a política do SCM ao serviço VPNMonitor (só o que
+// diverge). O serviço chama na partida: é o que garante a política numa
+// instalação pelo MSI. Como LocalSystem, o serviço tem SERVICE_ALL_ACCESS
+// sobre si mesmo no descritor padrão do SCM.
 func EnsurePolicy() error { return ensurePolicyNamed(ServiceName) }
 
 func ensurePolicyNamed(name string) error {
@@ -1485,15 +1629,27 @@ e, em `defaultEnv`, troque `isService: svc.IsService, runService: svc.Run, now: 
 		ensurePolicy: func() error { return nil },
 ```
 
-`cmd/vpnmon-svc/app.go` — em `serviceMain`, dentro de `Run`, entre a checagem de erro do `e.platform()` e o `return serve(…)`:
+`cmd/vpnmon-svc/app.go` — em `serviceMain`, troque o corpo do `Run` (de `Run: func(ctx context.Context) error {` até o `return serve(…)`, inclusive) por:
 
 ```go
-			// O MSI só registra o serviço (a tabela de recuperação do
-			// Windows Installer não funciona): a política vem daqui. Falha
-			// é aviso — o serviço sobe do mesmo jeito.
-			if err := e.ensurePolicy(); err != nil {
-				p.Events.Warning("aplicando a política de recuperação e de preshutdown do serviço: " + err.Error())
+		Run: func(ctx context.Context) error {
+			// Primeiro de tudo: o MSI só registra o serviço (a tabela de
+			// recuperação do Windows Installer não funciona), então a
+			// política vem daqui — e tem de valer mesmo que a partida falhe
+			// logo abaixo, para o SCM reiniciar o serviço. Falha é aviso.
+			policyErr := e.ensurePolicy()
+			l, err := paths(e)
+			if err != nil {
+				return err
 			}
+			p, err := e.platform()
+			if err != nil {
+				return err
+			}
+			if policyErr != nil {
+				p.Events.Warning("aplicando a política de recuperação e de preshutdown do serviço: " + policyErr.Error())
+			}
+			return serve(ctx, p, l, shared.RealClock{}, orch.Store)
 ```
 
 - [ ] **Step 4: Rodar e ver passar**
@@ -1523,7 +1679,7 @@ git commit -m "feat(svc): serviço reaplica recuperação e preshutdown a cada p
 
 **Interfaces:**
 - Consumes: `svc.ServiceName`, `svc.DisplayName`, `svc.Description`, `svc.Dependencies()` (Task 5), `acl.DirSDDL`, `logging.EventSourceName`.
-- Produces: `config.SeedRegistryPath` (agora em `seed.go`, sem build tag) e `func config.SeedValueNames() []string`; `installer/Product.wxs` com as variáveis de pré-processador `ProductVersion` (X.Y.Z) e `BinDir` (pasta dos exes); `pwsh scripts/build-msi.ps1 -Semver <semver> -ProductVersion <X.Y.Z> -BinDir <pasta> -OutDir <pasta>` gera `<OutDir>/VPNMonitor-<semver>-x64.msi` (instala o WiX 5.0.2 se faltar); `make lint-scripts` (`pwsh scripts/lint.ps1`).
+- Produces: `config.SeedRegistryPath` (agora em `seed.go`, sem build tag) e `func config.SeedValueNames() []string`; `installer/Product.wxs` com as variáveis de pré-processador `ProductVersion` (X.Y.Z) e `BinDir` (pasta dos exes), `<?define Manufacturer … ?>` (fabricante a confirmar) e `MSIRESTARTMANAGERCONTROL=Disable`; `pwsh scripts/build-msi.ps1 -Semver <semver> -ProductVersion <X.Y.Z> -BinDir <pasta> -OutDir <pasta>` gera `<OutDir>/VPNMonitor-<semver>-x64.msi` (instala o WiX 5.0.2 se faltar); `make lint-scripts` (`pwsh scripts/lint.ps1`).
 
 - [ ] **Step 1: Escrever os testes que falham**
 
@@ -1640,7 +1796,7 @@ func TestPackage(t *testing.T) {
 	p := load(t).one(t, nsWix, "Package")
 	want := map[string]string{
 		"Name": "VPN Monitor", "Version": "$(var.ProductVersion)", "UpgradeCode": upgradeCode,
-		"Scope": "perMachine", "InstallerVersion": "500",
+		"Manufacturer": "$(var.Manufacturer)", "Scope": "perMachine", "InstallerVersion": "500",
 	}
 	for k, v := range want {
 		if got := p.attr(k); got != v {
@@ -1649,6 +1805,17 @@ func TestPackage(t *testing.T) {
 	}
 	if mu := p.one(t, nsWix, "MajorUpgrade"); mu.attr("DowngradeErrorMessage") == "" || mu.attr("AllowDowngrades") != "" {
 		t.Errorf("MajorUpgrade deve bloquear downgrade: %+v", mu.Attrs)
+	}
+	// A bandeja não é fechada no upgrade (decisão do Marco C): exe em uso é
+	// trocado no reboot.
+	rm := ""
+	for _, pr := range p.all(nsWix, "Property") {
+		if pr.attr("Id") == "MSIRESTARTMANAGERCONTROL" {
+			rm = pr.attr("Value")
+		}
+	}
+	if rm != "Disable" {
+		t.Errorf("MSIRESTARTMANAGERCONTROL %q, quer Disable", rm)
 	}
 	if lc := p.one(t, nsWix, "Launch"); !strings.Contains(lc.attr("Condition"), "WINBUILD >= 17763") ||
 		!strings.Contains(lc.attr("Condition"), "VersionNT64") {
@@ -1893,11 +2060,14 @@ e troque a lista local `fields := []struct{…}{…}` e o `for _, f := range fie
   SDDL da pasta, chave do seed, origem do Event Log, prazos do SCM) são
   conferidos contra as constantes Go por installer/installer_test.go.
 -->
+<!-- Fabricante: A CONFIRMAR com o usuário. Trocar aqui e no CompanyName dos
+     dois cmd/*/winres/winres.json. -->
+<?define Manufacturer = "Central Informática" ?>
 <Wix xmlns="http://wixtoolset.org/schemas/v4/wxs"
      xmlns:util="http://wixtoolset.org/schemas/v4/wxs/util">
 
   <Package Name="VPN Monitor"
-           Manufacturer="Central Informática"
+           Manufacturer="$(var.Manufacturer)"
            Version="$(var.ProductVersion)"
            UpgradeCode="3A0A8DBB-61E5-4653-AFE7-63C4D3EF3ACF"
            Scope="perMachine"
@@ -1912,6 +2082,11 @@ e troque a lista local `fields := []struct{…}{…}` e o `for _, f := range fie
     <MajorUpgrade DowngradeErrorMessage="Uma versão mais nova do VPN Monitor já está instalada. Desinstale-a antes de instalar esta." />
 
     <MediaTemplate EmbedCab="yes" />
+
+    <!-- Sem Restart Manager: a bandeja aberta nas sessões não é fechada no
+         upgrade/desinstalação; o exe em uso é trocado na reinicialização
+         (msiexec devolve 3010) e o serviço já roda a versão nova. -->
+    <Property Id="MSIRESTARTMANAGERCONTROL" Value="Disable" />
 
     <!-- Windows 10 1809 (build 17763), Windows 11 ou Server 2019+, 64 bits.
          O VersionNT do MSI é congelado em 603 desde o 8.1; o número real do
@@ -2614,7 +2789,10 @@ e, ao fim do arquivo:
 ```go
 // Log da bandeja: um por usuário, em %LOCALAPPDATA%\VPNMonitor (o usuário não
 // lê a pasta do serviço). Pequeno e rotativo: só avisos da interface e o
-// ciclo de vida da bandeja.
+// ciclo de vida da bandeja. Limitação aceita: o mesmo usuário em duas
+// sessões (console + RDP) tem duas bandejas no mesmo arquivo; na rotação,
+// uma pode renomear o arquivo que a outra ainda usa e algumas linhas vão
+// parar no vpnmon-tray.1.log (nada se perde nem trava).
 const (
 	trayLogName     = "vpnmon-tray.log"
 	trayLogMaxBytes = 1 << 20
@@ -2688,7 +2866,7 @@ git commit -m "feat(tray): log da bandeja em %LOCALAPPDATA%\\VPNMonitor"
 - Consumes: artefato `msi-e2e` (Task 7), `vpnmon-svc status --json` (Task 8), `svc.EnsurePolicy` (Task 5), MSI (Task 6).
 - Produces: `pwsh scripts/e2e/run.ps1 -OldMsi <0.0.199> -NewMsi <0.0.299> -LogDir <pasta>` — passos 0–8 da §10.3 mais downgrade recusado e reinstalação; logs em `-LogDir` (artefato `e2e-logs`, sempre).
 
-O roteiro, passo a passo: (0) sonda RasMan + `Add-VpnConnection` → "runner sem RAS" se falhar; (1) entradas SSTP `E2E VPN` e `E2E Link` para 192.0.2.1, `-AllUserConnection`; (2) MSI 0.0.199 com `VPN_ENTRY="E2E VPN" VPN_NAME=Matriz CHECK_HOST=192.0.2.10 INTERVAL=5`; (3) serviço `Running`, automático, RasMan, LocalSystem, política do SCM no registro, ACL e ausência de quarentena, `config.json` do seed, Event Log "iniciado", `Run` e atalho; (4) `Reconectando`, só erros `transitorio`, três tentativas com espera crescente; `vpn add --check link` aparece no status; (5) `credential set --password-stdin` com senha acentuada, `credential list` = cofre; (6) parada ≤ 10 s com discagem em curso e nova partida; (7) upgrade 0.0.299 com hash de config e cofre iguais, uma só instalação, política reaplicada, downgrade recusado; (8) desinstala (serviço, pasta do programa e `Run` somem; ProgramData intacta), reinstala (usa a config existente), desinstala com `PURGE=1` (ProgramData some).
+O roteiro, passo a passo: (0) sonda RasMan + `Add-VpnConnection` → "runner sem RAS" se falhar; (1) entradas SSTP `E2E VPN` e `E2E Link` para 192.0.2.1, `-AllUserConnection`; (2) MSI 0.0.199 com `VPN_ENTRY="E2E VPN" VPN_NAME=Matriz CHECK_HOST=192.0.2.10 INTERVAL=5`; (3) serviço `Running`, automático, RasMan, LocalSystem, política do SCM no registro, ACL e ausência de quarentena, `config.json` do seed, Event Log "iniciado", `Run` e atalho; (4) `Reconectando`, só erros `transitorio`, três tentativas com espera crescente; `vpn add --check link` aparece no status; (5) `credential set --password-stdin` com senha acentuada, `credential list` = cofre; (6) parada ≤ 10 s com discagem em curso e nova partida; (6b) `Stop-Process -Force` no `vpnmon-svc` duas vezes: volta entre 3 e 25 s e depois entre 25 e 75 s (5 s e 30 s da política, com folga; a 2ª espera prova que a contagem de falhas não foi zerada); (7) upgrade 0.0.299 com hash de config e cofre iguais, uma só instalação, política e ACL conferidas de novo, downgrade recusado; (8) desinstala (serviço, pasta do programa e `Run` somem; ProgramData intacta), reinstala (usa a config existente; ACL conferida), desinstala com `PURGE=1` (ProgramData some). No passo 4, o backoff exige última espera ≥ primeira + 1 s (folga para a resolução de segundo).
 
 - [ ] **Step 1: Escrever o roteiro**
 
@@ -2942,7 +3120,8 @@ try {
     }
     Assert-That $sawReconnecting 'estado Reconectando observado'
     $keys = @($delays.Keys | Sort-Object)
-    Assert-That ($delays[$keys[-1]] -gt $delays[$keys[0]]) "backoff crescente ($(($keys | ForEach-Object { "$_=$($delays[$_])s" }) -join ', '))"
+    # Folga de 1 s: a espera é medida com resolução de segundo e jitter de ±20 %.
+    Assert-That ($delays[$keys[-1]] -ge $delays[$keys[0]] + 1) "backoff crescente ($(($keys | ForEach-Object { "$_=$($delays[$_])s" }) -join ', '))"
     Invoke-Svc @('vpn', 'add', '--name', 'Link', '--entry', $LinkEntry, '--check', 'link') | Write-Host
     Wait-Until -TimeoutSeconds 15 -Message 'VPN Link aparece no status' -Condition {
         @((Get-VpnStatus).vpns | Where-Object name -EQ 'Link').Count -eq 1
@@ -2966,6 +3145,22 @@ try {
     Start-Service VPNMonitor
     Wait-Until -TimeoutSeconds 30 -Message 'serviço de volta' -Condition { (Get-Service VPNMonitor).Status -eq 'Running' }
 
+    Write-Step '6b. Recuperação do SCM: processo morto volta em ~5 s e, na 2ª falha, em ~30 s'
+    # A política só é regravada quando diverge: se o serviço a regravasse a
+    # cada partida, a contagem de falhas zeraria e a 2ª espera seria 5 s.
+    foreach ($expected in @(@{ Min = 3; Max = 25 }, @{ Min = 25; Max = 75 })) {
+        $oldPid = (Get-CimInstance Win32_Service -Filter "Name='VPNMonitor'").ProcessId
+        $sw = [Diagnostics.Stopwatch]::StartNew()
+        Stop-Process -Id $oldPid -Force
+        Wait-Until -TimeoutSeconds ($expected.Max + 15) -Message 'serviço reiniciado pelo SCM' -Condition {
+            $svcNow = Get-CimInstance Win32_Service -Filter "Name='VPNMonitor'"
+            $svcNow.State -eq 'Running' -and $svcNow.ProcessId -ne 0 -and $svcNow.ProcessId -ne $oldPid
+        }
+        $sw.Stop()
+        $s = [math]::Round($sw.Elapsed.TotalSeconds, 1)
+        Assert-That ($s -ge $expected.Min -and $s -le $expected.Max) "voltou em $s s (esperado entre $($expected.Min) e $($expected.Max) s)"
+    }
+
     Write-Step '7. Upgrade para 0.0.299 preservando config e credencial; downgrade bloqueado'
     $before = Get-DataHash
     $code = Invoke-Msiexec -Mode '/i' -Msi $NewMsi -LogFile (Join-Path $LogDir 'upgrade-0.0.299.log')
@@ -2978,6 +3173,7 @@ try {
     Assert-That ((Get-DataHash) -eq $before) 'config.json e cofre intactos no upgrade'
     Assert-That ((Invoke-Svc @('credential', 'list')) -match '(?m)^Matriz\s+cofre') 'credencial preservada'
     Assert-ServicePolicy
+    Assert-DataAcl
     $code = Invoke-Msiexec -Mode '/i' -Msi $OldMsi -LogFile (Join-Path $LogDir 'downgrade-0.0.199.log')
     Assert-That ($code -notin 0, 3010) "downgrade para 0.0.199 recusado (código $code)"
     Assert-That (((Get-InstalledVersion) -join ',') -eq '0.0.299') 'continua 0.0.299'
@@ -2996,6 +3192,7 @@ try {
         (Get-Service VPNMonitor -ErrorAction SilentlyContinue).Status -eq 'Running'
     }
     Assert-That ((Get-DataHash) -eq $before) 'reinstalação usa a config existente'
+    Assert-DataAcl
     Save-DiagnosticLog -LogDir $LogDir
     $code = Invoke-Msiexec -Mode '/x' -Msi $NewMsi -LogFile (Join-Path $LogDir 'uninstall-purge.log') -Properties @('PURGE=1')
     Assert-That ($code -in 0, 3010) "msiexec /x PURGE=1 (código $code)"
@@ -3251,6 +3448,10 @@ jobs:
           args: --latest --strip header
         env:
           OUTPUT: notes.md
+          # Na final, só tags finais contam: as notas cobrem tudo desde a
+          # final anterior (com as rc no meio, ou com a final no mesmo commit
+          # da última rc, sairiam vazias ou parciais).
+          GIT_CLIFF__GIT__TAG_PATTERN: "${{ needs.validate.outputs.prerelease == 'false' && '^v[0-9]+\\.[0-9]+\\.[0-9]+$' || '^v[0-9]+\\.[0-9]+\\.[0-9]+(-rc\\.[0-9]+)?$' }}"
       - name: aviso de binários não assinados
         if: env.SIGNED != 'true'
         run: |
@@ -3299,7 +3500,9 @@ jobs:
   Para um HSM com KSP próprio (sem /dlib), troque os argumentos por
   /csp "<nome do KSP>" /kc "<nome da chave>" /f <certificado.cer>.
   A autenticação no provedor (ex.: azure/login com OIDC) fica em passos do
-  workflow antes deste.
+  workflow antes deste. Com Azure Trusted Signing por OIDC, o job "package"
+  do release.yml passa a precisar de "permissions: id-token: write" (hoje ele
+  só herda contents: read).
 
 .EXAMPLE
   pwsh scripts/sign.ps1 -Path build\vpnmon-svc.exe, build\vpnmon-tray.exe
@@ -3346,7 +3549,9 @@ foreach ($file in $Path) {
 
 ```toml
 # Notas de release (git-cliff, commits convencionais em pt-BR). A release usa
-# `git cliff --latest --strip header`: só a seção da tag atual.
+# `git cliff --latest --strip header`: só a seção da tag atual. Numa final, o
+# release.yml troca o tag_pattern por GIT_CLIFF__GIT__TAG_PATTERN (só finais),
+# para as notas cobrirem tudo desde a final anterior, rc incluídas.
 [changelog]
 header = "# Mudanças\n"
 body = """
@@ -3418,11 +3623,25 @@ Run:
 
 ```bash
 make lint-workflows && make lint-scripts && \
-go run ./tools/msiversion v2.1.0-beta.1; echo "código $?" && \
-git cliff --config cliff.toml --unreleased --strip header --tag v2.1.0 | head -5
+go run ./tools/msiversion v2.1.0-beta.1; echo "código $?"
 ```
 
-Expected: actionlint e PSScriptAnalyzer limpos; `erro: tag "v2.1.0-beta.1" fora do formato…` e `código 1` (é o que o `validate` faz com uma tag ruim); o git-cliff (v2.14, se instalado) imprime `## 2.1.0 — <data>` seguido de `### Novidades`. Sem git-cliff local, pule só esta última linha.
+Expected: actionlint e PSScriptAnalyzer limpos; `erro: tag "v2.1.0-beta.1" fora do formato…` e `código 1` (é o que o `validate` faz com uma tag ruim).
+
+Notas rc → final (com git-cliff v2.14 instalado), num repositório descartável:
+
+```bash
+CLIFF="$PWD/cliff.toml"; T=$(mktemp -d) && cd "$T" && git init -q && \
+c() { git commit -q --allow-empty -m "$1"; } && \
+c "feat: base" && git tag v1.0.0 && c "feat: nova A" && git tag v1.1.0-rc.1 && \
+c "fix: corrige B" && git tag v1.1.0-rc.2 && git tag v1.1.0 && \
+echo '--- final, sem o padrão só de finais:' && git cliff -c "$CLIFF" --latest --strip header && \
+echo '--- final, como no release.yml:' && \
+GIT_CLIFF__GIT__TAG_PATTERN='^v[0-9]+\.[0-9]+\.[0-9]+$' git cliff -c "$CLIFF" --latest --strip header; \
+cd - >/dev/null; rm -rf "$T"
+```
+
+Expected: a primeira saída é `## 1.1.0-rc.2` só com "Corrige B" (a final ficaria com as notas da rc); a segunda é `## 1.1.0 — <data>` com "Nova A" **e** "Corrige B".
 
 - [ ] **Step 3: Commit**
 
@@ -3631,10 +3850,26 @@ passos (instalação silenciosa + `credential set` com a senha num
 
 Instalar uma versão mais nova por cima atualiza (o `UpgradeCode` é fixo);
 `config.json`, estado, cofre e logs ficam. As VPNs conectadas **não caem**
-durante a troca. Instalar uma versão mais velha por cima é recusado. Com a
-bandeja aberta em alguma sessão, o exe dela está em uso: o msiexec termina
-com 3010 e a troca do arquivo da bandeja fica para a reinicialização (o
-serviço já roda a versão nova).
+durante a troca (a confirmar no roteiro manual, §18). Instalar uma versão
+mais velha por cima é recusado.
+
+O MSI desliga o Restart Manager (`MSIRESTARTMANAGERCONTROL=Disable`): a
+bandeja aberta nas sessões **não é fechada**. Com ela aberta, o exe está em
+uso, o msiexec termina com **3010** e a troca do `vpnmon-tray.exe` fica para
+a reinicialização; até lá a bandeja antiga segue funcionando com o serviço
+novo (a confirmar no roteiro manual, §18). Trate 3010 como sucesso no
+GPO/Intune.
+
+Num upgrade sem as propriedades do seed, a chave
+`HKLM\SOFTWARE\VPNMonitor\Seed` é regravada **vazia**: o `config.json`
+existente segue valendo, mas apagá-lo depois disso gera uma config vazia,
+não a do seed original (repita as propriedades no upgrade se quiser poder
+re-semear).
+
+O atalho do menu Iniciar é "anunciado" (do Windows Installer): ao abri-lo,
+o Windows confere os componentes do produto e, se algum sumiu (ex.: alguém
+apagou a origem `VPNMonitor` do Event Log), dispara um reparo do MSI, que
+pede UAC. A bandeja aberta pelo `Run` não passa por isso.
 
 ### Desinstalação
 
@@ -3642,6 +3877,10 @@ serviço já roda a versão nova).
 msiexec /x VPNMonitor-2.1.0-x64.msi /qn            # mantém C:\ProgramData\VPNMonitor
 msiexec /x VPNMonitor-2.1.0-x64.msi /qn PURGE=1    # apaga também a pasta de dados
 ```
+
+O `PURGE=1` apaga só `C:\ProgramData\VPNMonitor`; pastas de quarentena
+`C:\ProgramData\VPNMonitor.naoconfiavel-*` (§5.1), se houver, ficam — apague
+à mão depois de conferir.
 
 Quem instalou à mão com `vpnmon-svc install` deve rodar
 `vpnmon-svc uninstall` antes de instalar o MSI.
@@ -3657,10 +3896,12 @@ vpnmon-svc install | uninstall          registro manual do serviço (sem MSI)
 vpnmon-svc version
 ```
 
-O serviço reaplica a cada partida a política do SCM — reiniciar após 5 s,
+O serviço confere a cada partida a política do SCM — reiniciar após 5 s,
 30 s e 60 s (zerando em 1 dia, também quando para com erro) e 15 s de
-preshutdown — porque a tabela de recuperação do Windows Installer não
-funciona (a Microsoft documenta isso); assim, MSI e `install` ficam iguais.
+preshutdown — e regrava só o que divergir, porque a tabela de recuperação do
+Windows Installer não funciona (a Microsoft documenta isso); assim, MSI e
+`install` ficam iguais. Um ajuste diferente feito à mão no `services.msc`
+volta ao padrão na partida seguinte.
 
 ## Edição manual do config.json
 
@@ -3762,7 +4003,8 @@ sha256sum -c SHA256SUMS --ignore-missing
 gh attestation verify VPNMonitor-2.1.0-x64.msi --repo central-informatica/vpn-tray-monitor
 ```
 
-**Assinatura:** desligada por padrão; as notas dizem "binários não
+**Assinatura:** desligada por padrão (com Azure Trusted Signing por OIDC, o
+job `package` precisa de `id-token: write`; veja o `sign.ps1`); as notas dizem "binários não
 assinados". Para ligar, crie o environment `release`, defina a variável de
 repositório `SIGNING_ENABLED=true` e as variáveis `SIGN_DLIB`,
 `SIGN_DLIB_METADATA` e `SIGN_TIMESTAMP_URL` (e a autenticação do provedor)
@@ -3775,7 +4017,10 @@ conforme o cabeçalho de [`scripts/sign.ps1`](scripts/sign.ps1).
   `test-windows`, `build`, `msi` e `e2e`, com o ramo atualizado.
 - Histórico linear; sem push forçado nem exclusão.
 - Proteger as tags `v*` (regra de tag: só mantenedores criam).
-- Environment `release` com revisores obrigatórios, se a assinatura usar HSM.
+- Environment `release` (Settings → Environments) com **revisores
+  obrigatórios** e **"Deployment branches and tags" restrito a tags `v*`**:
+  é nele que ficam as variáveis/segredos da assinatura, e só uma tag de
+  release chega a ele.
 ````
 
 `docs/TESTE-MANUAL.md`:
@@ -3827,9 +4072,14 @@ que depende de usuário, sessão, domínio ou versão do Windows.
 
 - [ ] Com a VPN conectada, instalar a versão nova por cima: a VPN **não
       cai** (ping contínuo ao alvo durante o upgrade).
-- [ ] Com a bandeja aberta em duas sessões (RDP): msiexec termina com 0 ou
-      3010; as bandejas antigas seguem funcionando com o serviço novo; após
-      reiniciar (ou novo login), a bandeja nova abre.
+- [ ] Com a bandeja aberta em duas sessões (RDP): a bandeja **não** é
+      fechada (Restart Manager desligado no MSI); msiexec termina com 3010;
+      as bandejas antigas seguem funcionando com o serviço novo; após
+      reiniciar, a bandeja nova abre (comportamento ainda não provado — o
+      e2e do CI não tem sessão com bandeja).
+- [ ] Atalho do menu Iniciar (anunciado) depois de apagar a origem
+      `VPNMonitor` do Event Log (`HKLM\SYSTEM\CurrentControlSet\Services\EventLog\Application\VPNMonitor`):
+      dispara reparo do MSI com UAC e recria a origem.
 - [ ] "Sobre / versão" na bandeja e `vpnmon-svc version` mostram a versão
       nova.
 
@@ -3860,8 +4110,9 @@ que depende de usuário, sessão, domínio ou versão do Windows.
 
 ### 22. Desinstalação
 
-- [ ] Desinstalar com a bandeja aberta: termina (3010 se o exe da bandeja
-      estiver em uso); a pasta de dados fica.
+- [ ] Desinstalar com a bandeja aberta: a bandeja não é fechada; msiexec
+      termina com 3010 e o exe some na reinicialização; a pasta de dados
+      fica (a confirmar).
 - [ ] Reinstalar: as VPNs e credenciais voltam como estavam.
 - [ ] `msiexec /x … PURGE=1`: a pasta de dados some; pastas
       `VPNMonitor.naoconfiavel-*` de quarentena, se houver, ficam (apague à
@@ -3877,7 +4128,7 @@ que depende de usuário, sessão, domínio ou versão do Windows.
 - [ ] **Step 2: Conferir**
 
 Run: `make lint-scripts && grep -c -- '- \[ \]' docs/TESTE-MANUAL.md && make lint && go test -race ./...`
-Expected: scripts limpos; `73` itens no roteiro manual; lint e testes verdes.
+Expected: scripts limpos; `74` itens no roteiro manual; lint e testes verdes.
 
 - [ ] **Step 3: Commit e push final**
 
@@ -3898,8 +4149,11 @@ Expected: CI inteiro verde no ramo (os oito jobs da proteção de branch recomen
 - **Cobertura por pacote** abaixo de 80 % em `core/logging` (71,7 %), `core/platform/icmp` (68 %) e `core/platform/svc` (74,2 %) — o total passa; subir com testes dos ramos `_other`/erro.
 - **Bandeja com `SetIcon`/`SetToolTip` falhando todo tique**: agora vai para o arquivo (limitado a 3 MB pela rotação); limitar a 1 aviso por minuto (minor do Marco B).
 - **`rasBusy` barrando o pedido do snapshot** (lista "Adicionar VPN" velha por até 60 s, minor do Marco B).
-- **Ajuste manual de recuperação no `services.msc`** é desfeito pelo `EnsurePolicy` na próxima partida (documentado; se incomodar, aplicar só quando divergir *e* registrar no log).
-- **Arquivo da bandeja em uso no upgrade** → msiexec 3010 e troca no reboot (sem `util:CloseApplication`, que é custom action); validar no roteiro manual §18.
+- **Ajuste manual diferente no `services.msc`** volta ao padrão pelo `EnsurePolicy` na próxima partida (documentado; se incomodar, registrar no log quando regravar).
+- **Log da bandeja com o mesmo usuário em duas sessões** (console + RDP): duas bandejas no mesmo `%LOCALAPPDATA%\VPNMonitor\vpnmon-tray.log`; na rotação, linhas podem cair no `.1.log` (nada se perde nem trava; anotado no código).
+- **Atalho comum em vez de anunciado**, se a validação ICE do CI aceitar um componente com chave HKLM no menu Iniciar (evita o reparo com UAC).
+- **WiX e PSScriptAnalyzer fixados só por versão** (risco aceito; ver Decisões).
+- **Arquivo da bandeja em uso no upgrade** → msiexec 3010 e troca no reboot (Restart Manager desligado; sem `util:CloseApplication`, que é custom action); confirmar no roteiro manual §18 e §22.
 - Os minors adiados dos Marcos A e B que não foram citados acima continuam nos respectivos documentos de decisões.
 
 ## Autorrevisão (feita)
