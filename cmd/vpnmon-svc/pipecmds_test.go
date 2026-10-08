@@ -96,6 +96,22 @@ func TestFormatStatus(t *testing.T) {
 	}
 }
 
+// "próxima em" nunca negativo: prazo vencido (relógio do cliente à frente do
+// serviço) é omitido.
+func TestFormatStatusNextAttemptNeverNegative(t *testing.T) {
+	now := time.Date(2026, 10, 7, 15, 0, 0, 0, time.UTC)
+	snap := ipc.Snapshot{VPNs: []ipc.VPNView{{Name: "Filial", State: "Reconectando", Attempt: 2,
+		NextAttemptUnix: now.Add(-30 * time.Second).Unix()}}}
+	out := formatStatus(snap, now)
+	if strings.Contains(out, "próxima em") || strings.Contains(out, "-") {
+		t.Fatalf("prazo vencido não deve aparecer: %s", out)
+	}
+	snap.VPNs[0].NextAttemptUnix = now.Unix()
+	if out := formatStatus(snap, now); strings.Contains(out, "próxima em") {
+		t.Fatalf("prazo no instante atual não deve aparecer: %s", out)
+	}
+}
+
 func TestExplainShowsServerMessage(t *testing.T) {
 	msg := "config.json foi alterado no disco; aguarde a recarga e tente de novo"
 	err := explain(&ipc.Error{Code: ipc.CodeInvalidConfig, Message: msg})
@@ -106,6 +122,10 @@ func TestExplainShowsServerMessage(t *testing.T) {
 		Fields: []config.FieldError{{Field: "check.port", Message: "obrigatória"}, {Field: "outro", Message: "m"}}})
 	if err == nil || err.Error() != "--port: obrigatória; outro: m" {
 		t.Fatalf("por campo: %v", err)
+	}
+	// Sem mensagem, o código aparece (nunca "erro: " vazio).
+	if err := explain(&ipc.Error{Code: ipc.CodeBusy}); err == nil || err.Error() != ipc.CodeBusy {
+		t.Fatalf("sem mensagem: %v", err)
 	}
 	plain := errors.New("serviço VPN Monitor inacessível")
 	if explain(plain) != plain {
@@ -136,16 +156,18 @@ func TestCheckLocalDoesNotDial(t *testing.T) {
 	nw := fake.NewNet()
 	te.platform = func() (Platform, error) { return Platform{RAS: r, Pinger: pinger, Net: nw}, nil }
 
-	if code := te.run("check", "matriz"); code != 0 || !strings.Contains(te.out.String(), "enlace caído") {
+	// Saída 0 só com tudo OK; enlace caído, sem rede ou alvo falhando = 1,
+	// com o diagnóstico na saída padrão e nada de "erro:" extra.
+	if code := te.run("check", "matriz"); code != 1 || !strings.Contains(te.out.String(), "enlace caído") || te.errb.Len() != 0 {
 		t.Fatalf("caído: %d %q %q", code, te.out, te.errb)
 	}
 	nw.SetPhysical(false)
-	if code := te.run("check", "Matriz"); code != 0 || !strings.Contains(te.out.String(), "sem rede física") {
+	if code := te.run("check", "Matriz"); code != 1 || !strings.Contains(te.out.String(), "sem rede física") {
 		t.Fatalf("sem rede: %d %q", code, te.out)
 	}
 	nw.SetPhysical(true)
 	r.SetActive("VPN Matriz")
-	if code := te.run("check", "Matriz"); code != 0 || !strings.Contains(te.out.String(), "sem resposta") {
+	if code := te.run("check", "Matriz"); code != 1 || !strings.Contains(te.out.String(), "sem resposta") {
 		t.Fatalf("sem eco: %d %q", code, te.out)
 	}
 	pinger.SetReachable("10.0.0.1", true)
@@ -155,6 +177,15 @@ func TestCheckLocalDoesNotDial(t *testing.T) {
 	r.SetActive("VPN Filial")
 	if code := te.run("check", "Filial"); code != 0 || !strings.Contains(te.out.String(), "verificação link") {
 		t.Fatalf("link: %d %q", code, te.out)
+	}
+	// Verificador que falha (o ping nem pôde ser feito).
+	r.SetActive("VPN Matriz")
+	pinger.SetError("10.0.0.1", errors.New("IcmpSendEcho2: acesso negado"))
+	if code := te.run("check", "Matriz"); code != 1 || !strings.Contains(te.out.String(), "falhou") {
+		t.Fatalf("verificador com erro: %d %q %q", code, te.out, te.errb)
+	}
+	if !strings.Contains(usage, "check <vpn>") || !strings.Contains(usage, "sai com 1") {
+		t.Fatalf("usage deve documentar o código de saída do check:\n%s", usage)
 	}
 	if code := te.run("check", "Nenhuma"); code != 1 || !strings.Contains(te.errb.String(), "não existe") {
 		t.Fatalf("inexistente: %d %q", code, te.errb)

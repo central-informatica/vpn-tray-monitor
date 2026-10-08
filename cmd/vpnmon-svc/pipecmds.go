@@ -70,8 +70,10 @@ func formatStatus(s ipc.Snapshot, now time.Time) string {
 		if v.Attempt > 0 {
 			detail = append(detail, fmt.Sprintf("tentativa %d", v.Attempt))
 		}
-		if v.NextAttemptUnix > 0 {
-			detail = append(detail, fmt.Sprintf("próxima em %s", domain.FormatOutage(time.Unix(v.NextAttemptUnix, 0).Sub(now))))
+		// Prazo já vencido (ou relógio do cliente à frente) é omitido:
+		// "próxima em" nunca é negativo.
+		if next := time.Unix(v.NextAttemptUnix, 0); v.NextAttemptUnix > 0 && next.After(now) {
+			detail = append(detail, fmt.Sprintf("próxima em %s", domain.FormatOutage(next.Sub(now))))
 		}
 		switch {
 		case v.PausedIndefinite:
@@ -169,6 +171,9 @@ func explain(err error) error {
 		return err
 	}
 	if len(ie.Fields) == 0 {
+		if ie.Message == "" {
+			return errors.New(ie.Code) // nunca "erro: " vazio
+		}
 		return errors.New(ie.Message)
 	}
 	parts := make([]string, len(ie.Fields))
@@ -240,8 +245,13 @@ func parseVPNAdd(args []string) (config.RawVPN, error) {
 	return raw, nil
 }
 
+// errCheckFailed: o check rodou e o diagnóstico já saiu na saída padrão,
+// mas a VPN não está OK (código 1, sem linha de erro extra).
+var errCheckFailed = silentExit{1}
+
 // cmdCheck faz uma verificação única no próprio processo, sem discar: lê a
 // config do disco, consulta o enlace no RAS e, se de pé, roda o verificador.
+// Sai com 0 só com tudo OK; sem rede, enlace caído ou alvo falhando = 1.
 func cmdCheck(args []string, e env) error {
 	if len(args) != 1 {
 		return usageError{"use: check <vpn>"}
@@ -276,8 +286,10 @@ func cmdCheck(args []string, e env) error {
 	switch {
 	case !link.Network:
 		fmt.Fprintf(e.stdout, "%s: sem rede física com rota padrão\n", vpn.Name)
+		return errCheckFailed
 	case !link.Up:
 		fmt.Fprintf(e.stdout, "%s: enlace caído (entrada %q não conectada)\n", vpn.Name, vpn.RasEntry)
+		return errCheckFailed
 	case vpn.Check.Kind == config.CheckLink:
 		fmt.Fprintf(e.stdout, "%s: enlace de pé (verificação link)\n", vpn.Name)
 	default:
@@ -289,8 +301,10 @@ func cmdCheck(args []string, e env) error {
 			fmt.Fprintf(e.stdout, "%s: enlace de pé; %s %s respondeu em %dms\n", vpn.Name, vpn.Check.Kind, vpn.Check.Host, r.RTT.Milliseconds())
 		case r.Err != nil:
 			fmt.Fprintf(e.stdout, "%s: enlace de pé; %s %s falhou: %v\n", vpn.Name, vpn.Check.Kind, vpn.Check.Host, r.Err)
+			return errCheckFailed
 		default:
 			fmt.Fprintf(e.stdout, "%s: enlace de pé; %s %s sem resposta\n", vpn.Name, vpn.Check.Kind, vpn.Check.Host)
+			return errCheckFailed
 		}
 	}
 	return nil

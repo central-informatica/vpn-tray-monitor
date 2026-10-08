@@ -25,7 +25,8 @@ const usage = `uso: vpnmon-svc <comando>
 
   run                                  modo console, para depurar
   status                               estado de cada VPN (via pipe)
-  check <vpn>                          verificação única, sem discar
+  check <vpn>                          verificação única, sem discar; sai com 1
+                                       se sem rede, enlace caído ou alvo falhando
   vpn add --name N --entry E [--check ping|tcp|link] [--host H] [--port P]
           [--interval S] [--failures N] [--grace S] [--connect-timeout S]
           [--max-backoff S] [--disabled]
@@ -86,6 +87,12 @@ type usageError struct{ msg string }
 
 func (e usageError) Error() string { return e.msg }
 
+// silentExit leva ao código dado sem imprimir "erro:" (o comando já
+// explicou o resultado na saída padrão).
+type silentExit struct{ code int }
+
+func (e silentExit) Error() string { return fmt.Sprintf("código de saída %d", e.code) }
+
 func runCLI(args []string, e env) int {
 	if len(args) == 0 {
 		// Sem argumentos e iniciado pelo SCM: o processo vira o serviço.
@@ -97,9 +104,12 @@ func runCLI(args []string, e env) int {
 	}
 	err := dispatch(args, e)
 	var ue usageError
+	var se silentExit
 	switch {
 	case err == nil:
 		return 0
+	case errors.As(err, &se):
+		return se.code
 	case errors.As(err, &ue):
 		fmt.Fprintf(e.stderr, "%s\n\n%s", ue.msg, usage)
 		return 2
