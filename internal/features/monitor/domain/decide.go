@@ -103,6 +103,16 @@ func Decide(s Status, in Input, p Params, env Env) Decision {
 		onReach(&d, in, p, env)
 	case InDialResult:
 		onDial(&d, in, p, env)
+	case InCheckNow:
+		onCheckNow(&d)
+	case InReconnect:
+		onReconnect(&d, in, p, env)
+	case InPause:
+		onPause(&d, in, env)
+	case InResume:
+		onResume(&d, in, p, env)
+	case InCredentialChanged:
+		onCredentialChanged(&d, in, p, env)
 	}
 	return d
 }
@@ -225,14 +235,11 @@ func onLink(d *Decision, in Input, p Params, env Env) {
 		d.goUp(p, now)
 		d.Next.NextTick = now.Add(p.Interval)
 	case now.Before(s.GraceUntil):
-		// Carência: não verifica alcance. Se há queda em aberto, o "voltou"
-		// e o reset do backoff esperam o primeiro alcance OK.
+		// Carência (só ping/tcp; link já saiu acima): não verifica alcance.
+		// O "voltou", o WasUp e o reset do backoff esperam o primeiro
+		// alcance OK, nunca o evento de enlace.
 		d.Next.LastRTT = 0
-		if s.DownSince.IsZero() {
-			d.goUp(p, now)
-		} else {
-			d.set(Conectada, now)
-		}
+		d.set(Conectada, now)
 		d.Next.NextTick = now.Add(p.Interval)
 	default:
 		d.start(OpProbeReach)
@@ -248,7 +255,6 @@ func onReach(d *Decision, in Input, p Params, env Env) {
 	}
 	if in.ReachOK {
 		d.Next.LastRTT = in.RTT
-		d.Next.Attempt = 0
 		d.goUp(p, now)
 		d.Next.NextTick = now.Add(p.Interval)
 		return
