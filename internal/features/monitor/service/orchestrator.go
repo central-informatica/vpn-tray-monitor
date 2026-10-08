@@ -119,6 +119,9 @@ type Orchestrator struct {
 	// espera por eles também.
 	draining    map[*running]struct{}
 	lastWritten string // hash do último config.json gravado pelo serviço
+	// unreadable: o último configStatus publicado foi "ilegível/removido";
+	// a próxima leitura bem-sucedida publica OK mesmo sem nada a reaplicar.
+	unreadable bool
 	// removed guarda, por NameKey, a memória de credencial rejeitada de uma
 	// VPN removida por removedMemoryTTL: remover e adicionar de novo com o
 	// mesmo nome não pode render uma discagem com a credencial rejeitada (§4.7).

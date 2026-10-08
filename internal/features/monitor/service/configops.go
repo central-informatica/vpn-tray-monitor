@@ -234,8 +234,16 @@ func (o *Orchestrator) ReloadFromDisk() error {
 	h := hashBytes(data)
 	o.mu.Lock()
 	same := h == o.lastWritten && o.diskInvalid == nil
+	wasUnreadable := o.unreadable
+	o.unreadable = false
 	o.mu.Unlock()
 	if same {
+		if wasUnreadable {
+			// O arquivo voltou igual ao que está em uso (ex.: apagado e
+			// restaurado): nada a reaplicar, mas o aviso de "removido" sai.
+			o.opts.Log.Info("config.json legível de novo; configuração em uso mantida")
+			o.bus.publish(ipc.MustMessage("", ipc.TypeConfigStatus, ipc.ConfigStatus{OK: true}))
+		}
 		return nil
 	}
 	c, err := config.Parse(data)
@@ -274,6 +282,9 @@ func (o *Orchestrator) ConfigUnreadable(err error) {
 	if errors.Is(err, fs.ErrNotExist) {
 		msg = "config.json removido; mantendo a configuração em uso"
 	}
+	o.mu.Lock()
+	o.unreadable = true // a próxima leitura bem-sucedida publica OK
+	o.mu.Unlock()
 	o.opts.Log.Error(msg)
 	o.opts.Events.Warning(msg)
 	o.bus.publish(ipc.MustMessage("", ipc.TypeConfigStatus, ipc.ConfigStatus{OK: false, Message: msg}))

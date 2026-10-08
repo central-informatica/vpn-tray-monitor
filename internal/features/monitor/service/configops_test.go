@@ -545,3 +545,49 @@ func TestRemoveAddWithNewCredentialDials(t *testing.T) {
 	}
 	h.waitView("Matriz", domain.Conectada)
 }
+
+// P3 config.json apagado e devolvido idêntico ao último gravado: o status
+// "removido" não fica preso; volta configStatus{OK:true} sem reaplicar.
+func TestConfigBackIdenticalClearsRemovedStatus(t *testing.T) {
+	w := &stubWorld{up: true, network: true}
+	h := newOrch(t, w, cfgWith(vpnNamed("Matriz")), config.State{})
+	h.waitView("Matriz", domain.Conectada)
+	sup := h.supOf("Matriz")
+	orig, err := os.ReadFile(h.paths.ConfigFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	events, cancel := h.o.Subscribe()
+	defer cancel()
+	<-events // snapshot
+
+	_ = os.Remove(h.paths.ConfigFile)
+	h.o.ConfigUnreadable(h.o.ReloadFromDisk())
+	for range drain(events) {
+	}
+	_ = os.WriteFile(h.paths.ConfigFile, orig, 0o600)
+	if err := h.o.ReloadFromDisk(); err != nil {
+		t.Fatal(err)
+	}
+	var st ipc.ConfigStatus
+	got := false
+	for m := range drain(events) {
+		switch m.Type {
+		case ipc.TypeConfigStatus:
+			got = ipc.DecodePayload(m.Payload, &st) == nil
+		case ipc.TypeSnapshot:
+			t.Fatal("arquivo idêntico não deve reaplicar a config")
+		}
+	}
+	if !got || !st.OK {
+		t.Fatalf("configStatus após a volta do arquivo: %v %+v", got, st)
+	}
+	if h.supOf("Matriz") != sup {
+		t.Fatal("arquivo idêntico não pode reiniciar o supervisor")
+	}
+	// Recarga seguinte do mesmo arquivo: nada a publicar.
+	_ = h.o.ReloadFromDisk()
+	for m := range drain(events) {
+		t.Fatalf("recarga repetida publicou %s", m.Type)
+	}
+}
