@@ -436,3 +436,26 @@ func TestServerReturnsWhenListenerCloses(t *testing.T) {
 		t.Fatal("Serve não voltou com o listener fechado")
 	}
 }
+
+// O cliente confere a versão de protocolo devolvida no hello: um servidor
+// que responda outra versão é recusado com incompatible.
+func TestClientChecksServerProtocol(t *testing.T) {
+	cli, srv := net.Pipe()
+	go func() {
+		codec := NewCodec(srv)
+		m, err := codec.Read()
+		if err != nil {
+			return
+		}
+		_ = codec.Write(MustMessage(m.ID, TypeHello, Hello{Protocol: ProtocolVersion + 1, AppVersion: "9.9"}))
+	}()
+	var e *Error
+	cl, err := Handshake(cli, "x")
+	if !errors.As(err, &e) || e.Code != CodeIncompatible || !strings.Contains(e.Message, "protocolo") {
+		t.Fatalf("protocolo divergente deve ser recusado: %v %v", cl, err)
+	}
+	// A conexão foi fechada pelo cliente.
+	if _, err := cli.Write([]byte("x")); err == nil {
+		t.Fatal("conexão deveria estar fechada")
+	}
+}

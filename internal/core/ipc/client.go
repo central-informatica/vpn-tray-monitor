@@ -26,6 +26,11 @@ func Handshake(c net.Conn, appVersion string) (*Client, error) {
 		c.Close()
 		return nil, err
 	}
+	if h.Protocol != ProtocolVersion {
+		c.Close()
+		return nil, &Error{Code: CodeIncompatible,
+			Message: fmt.Sprintf("o serviço fala o protocolo %d e este programa o %d; atualize o VPN Monitor", h.Protocol, ProtocolVersion)}
+	}
 	cl.ServerApp = h.AppVersion
 	return cl, nil
 }

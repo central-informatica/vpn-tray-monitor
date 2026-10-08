@@ -123,31 +123,44 @@ func dispatch(args []string, e env) error {
 		return nil
 	}
 	// O nome do comando é validado antes da elevação: desconhecido é uso (2).
-	switch cmd {
-	case "run", "status", "check", "vpn", "install", "uninstall", "credential", "config":
-	default:
+	run, ok := commands[cmd]
+	if !ok {
 		return usageError{fmt.Sprintf("comando desconhecido %q", cmd)}
 	}
 	if !e.elevated() {
 		return errors.New("este comando exige um prompt de administrador")
 	}
-	switch cmd {
-	case "run":
-		return cmdRun(e)
-	case "install":
-		return cmdInstall(e)
-	case "uninstall":
+	return run(rest, e)
+}
+
+// commands é a única lista dos comandos que exigem elevação: serve tanto para
+// reconhecer o nome antes da elevação quanto para despachar. version e help
+// são tratados antes, em dispatch.
+var commands = map[string]func(rest []string, e env) error{
+	"run":     noArgs("run", cmdRun),
+	"status":  noArgs("status", cmdStatus),
+	"check":   cmdCheck,
+	"vpn":     cmdVPN,
+	"install": noArgs("install", cmdInstall),
+	"uninstall": noArgs("uninstall", func(e env) error {
 		if err := e.uninstall(); err != nil {
 			return err
 		}
 		fmt.Fprintln(e.stdout, "serviço VPNMonitor removido")
 		return nil
-	case "credential":
-		return cmdCredential(rest, e)
-	case "config":
-		return cmdConfig(rest, e)
+	}),
+	"credential": cmdCredential,
+	"config":     cmdConfig,
+}
+
+// noArgs adapta um comando sem argumentos; argumentos a mais são uso (2).
+func noArgs(name string, f func(env) error) func([]string, env) error {
+	return func(rest []string, e env) error {
+		if len(rest) > 0 {
+			return usageError{fmt.Sprintf("%s não aceita argumentos", name)}
+		}
+		return f(e)
 	}
-	return usageError{fmt.Sprintf("comando desconhecido %q", cmd)}
 }
 
 func orDash(s string) string {

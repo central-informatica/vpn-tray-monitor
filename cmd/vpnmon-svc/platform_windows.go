@@ -56,27 +56,31 @@ func stdinIsConsole() bool {
 }
 
 // readPassword lê uma linha do console sem eco. Ctrl+C durante a leitura
-// restaura o modo do console e devolve errCancelled.
+// restaura o modo do console e devolve errCancelled (código 130).
 func readPassword(in io.Reader) (string, error) {
 	h := windows.Handle(os.Stdin.Fd())
 	var mode uint32
 	if err := windows.GetConsoleMode(h, &mode); err != nil {
 		return "", errors.New("sem console para ler a senha; use --password-stdin")
 	}
+	// O sinal é registrado ANTES de desligar o eco: um Ctrl+C entre os dois
+	// mataria o processo com o console sem eco.
+	sig := make(chan os.Signal, 1)
+	signal.Notify(sig, os.Interrupt)
+	defer signal.Stop(sig)
 	if err := windows.SetConsoleMode(h, mode&^windows.ENABLE_ECHO_INPUT); err != nil {
 		return "", err
 	}
 	defer func() { _ = windows.SetConsoleMode(h, mode) }()
-
-	sig := make(chan os.Signal, 1)
-	signal.Notify(sig, os.Interrupt)
-	defer signal.Stop(sig)
 
 	type result struct {
 		line string
 		err  error
 	}
 	done := make(chan result, 1)
+	// Após um cancelamento esta goroutine fica presa na leitura do console;
+	// não há como interrompê-la, mas é inofensivo: errCancelled leva a CLI a
+	// sair logo em seguida (código 130) e o processo termina com ela.
 	go func() {
 		line, err := bufio.NewReader(in).ReadString('\n')
 		done <- result{line, err}
@@ -85,8 +89,16 @@ func readPassword(in io.Reader) (string, error) {
 	case <-sig:
 		return "", errCancelled // o defer restaura o eco
 	case r := <-done:
+		// Ctrl+C também aborta a leitura do console, e o resultado pode
+		// chegar antes do sinal: confere o sinal sem bloquear e trata linha
+		// vazia com erro (leitura abortada, Ctrl+Z) como cancelamento.
+		select {
+		case <-sig:
+			return "", errCancelled
+		default:
+		}
 		if r.err != nil && r.line == "" {
-			return "", r.err
+			return "", errCancelled
 		}
 		return trimEOL(r.line), nil
 	}
