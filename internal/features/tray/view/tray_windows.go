@@ -87,7 +87,7 @@ func Run(o Options) (int, error) {
 	t := &Tray{o: o, app: app, ni: ni, vm: viewmodel.New(o.AppVersion)}
 	// Remove o ícone da bandeja antes de liberar as imagens que ele usa.
 	defer func() {
-		ni.Dispose()
+		_ = ni.Dispose()
 		disposeIcons(t.icons)
 	}()
 	icons, dpi, err := t.loadIcons()

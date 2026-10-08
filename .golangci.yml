@@ -1,0 +1,29 @@
+# golangci-lint v2 (o CI fixa a versão). Roda no Linux e com GOOS=windows:
+# make lint e o job lint do CI fazem as duas passadas.
+version: "2"
+linters:
+  default: standard # errcheck, govet, ineffassign, staticcheck, unused
+  settings:
+    errcheck:
+      # Liberações de recurso sem caminho de recuperação: o erro não muda
+      # nada para quem chama (o handle já está perdido de qualquer jeito).
+      exclude-functions:
+        - golang.org/x/sys/windows.CloseHandle
+        - golang.org/x/sys/windows.CloseServiceHandle
+        - golang.org/x/sys/windows.LocalFree
+        - golang.org/x/sys/windows.MessageBox
+        - (*golang.org/x/sys/windows/svc/mgr.Mgr).Disconnect
+  exclusions:
+    presets:
+      - std-error-handling # Close, Flush, fmt.Fprint* e afins
+    rules:
+      # Nos testes, um erro ignorado aparece como falha da asserção seguinte.
+      - path: _test\.go
+        linters: [errcheck]
+      # Sugestões de estilo (De Morgan etc.), não defeitos.
+      - linters: [staticcheck]
+        text: "^QF"
+      # walk.MsgBox é a caixa de mensagem síncrona que a bandeja quer; o
+      # TaskDialog sugerido não acrescenta nada aqui.
+      - linters: [staticcheck]
+        text: "SA1019: github.com/tailscale/walk.MsgBox"

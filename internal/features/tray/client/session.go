@@ -66,7 +66,7 @@ func openSession(conn net.Conn, appVersion string, timeout time.Duration, emit f
 // que importa é o protocolo.
 func (s *session) hello(appVersion string, timeout time.Duration) (string, error) {
 	_ = s.conn.SetDeadline(time.Now().Add(timeout))
-	defer s.conn.SetDeadline(time.Time{})
+	defer func() { _ = s.conn.SetDeadline(time.Time{}) }()
 	if err := s.codec.Write(ipc.MustMessage("0", ipc.TypeHello, ipc.Hello{Protocol: ipc.ProtocolVersion, AppVersion: appVersion})); err != nil {
 		return "", err
 	}

@@ -185,7 +185,7 @@ func TestServerHandshakeRules(t *testing.T) {
 	c.Write([]byte(`{"v":1,"id":"1","type":"status"}` + "\n"))
 	expectErrorAndClose(t, r, CodeBadRequest)
 
-	c, r = rawConn(t, addr) // não manda nada: prazo do handshake
+	_, r = rawConn(t, addr) // não manda nada: prazo do handshake
 	if _, err := r.ReadString('\n'); err == nil {
 		t.Fatal("sem hello a conexão deve cair")
 	}

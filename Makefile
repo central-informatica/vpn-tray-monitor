@@ -9,17 +9,28 @@ WIN     := GOOS=windows GOARCH=amd64
 # A conversão da §10.2 (rc → Z×100+N) entra no release do Marco C.
 WINVER  := $(or $(shell echo $(VERSION) | sed -nE 's/^v?([0-9]+)\.([0-9]+)\.([0-9]+).*/\1.\2.\3.0/p'),0.0.0.0)
 WINRES  := go run github.com/tc-hib/go-winres@v0.3.3
+GOLANGCI ?= golangci-lint
 COVER_PKGS := ./internal/core/... ./internal/features/monitor/domain ./internal/features/monitor/service ./internal/features/tray/viewmodel
 
-.PHONY: all lint test cover cover-tray winres build clean
+.PHONY: all lint lint-go lint-golangci lint-workflows test cover cover-tray winres build clean
 
 all: lint test build
 
-lint:
+lint: lint-go lint-golangci
+
+lint-go:
 	@out=$$(gofmt -l .); if [ -n "$$out" ]; then echo "gofmt pendente:"; echo "$$out"; exit 1; fi
 	go mod tidy -diff
 	go vet ./...
-	$(WIN) go vet ./...
+	GOOS=windows go vet ./...
+
+# Linux e Windows: boa parte do código só compila com GOOS=windows.
+lint-golangci:
+	$(GOLANGCI) run ./...
+	GOOS=windows $(GOLANGCI) run ./...
+
+lint-workflows:
+	go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.12
 
 test:
 	go test -race -shuffle=on ./...
