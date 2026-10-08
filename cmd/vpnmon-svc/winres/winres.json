@@ -1,0 +1,46 @@
+{
+  "RT_GROUP_ICON": {
+    "APP": {
+      "0000": "../../../assets/conectada.ico"
+    }
+  },
+  "RT_MANIFEST": {
+    "#1": {
+      "0409": {
+        "identity": {
+          "name": "VPNMonitor.Service",
+          "version": ""
+        },
+        "description": "VPN Monitor - serviço e CLI",
+        "minimum-os": "win10",
+        "execution-level": "as invoker",
+        "ui-access": false,
+        "auto-elevate": false,
+        "dpi-awareness": "system",
+        "use-common-controls-v6": false
+      }
+    }
+  },
+  "RT_VERSION": {
+    "#1": {
+      "0000": {
+        "fixed": {
+          "file_version": "0.0.0.0",
+          "product_version": "0.0.0.0"
+        },
+        "info": {
+          "0409": {
+            "CompanyName": "Central Informática",
+            "FileDescription": "VPN Monitor - serviço e CLI",
+            "InternalName": "vpnmon-svc",
+            "LegalCopyright": "",
+            "OriginalFilename": "vpnmon-svc.exe",
+            "ProductName": "VPN Monitor",
+            "ProductVersion": "",
+            "FileVersion": ""
+          }
+        }
+      }
+    }
+  }
+}
