@@ -54,12 +54,13 @@ func section(sddl, tag string) (string, bool) {
 	return s, true
 }
 
-// Matches confere um SDDL com dono (O:) e DACL (D:): dono Administradores,
+// Matches confere um SDDL com dono (O:) e DACL (D:): dono Administradores
+// ou SYSTEM (como nos filhos),
 // DACL protegida (P) e exatamente as ACEs de SYSTEM e Administradores, em
 // qualquer ordem.
 func Matches(sddl string) bool {
 	owner, ok := section(sddl, "O:")
-	if !ok || owner != "BA" {
+	if !ok || !OwnerTrusted(owner) {
 		return false
 	}
 	d, ok := section(sddl, "D:")

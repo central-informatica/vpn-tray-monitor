@@ -97,11 +97,11 @@ func TestWindowsEnsureDirReappliesEmptyRoot(t *testing.T) {
 		t.Fatal(err)
 	}
 	changed, err := New().EnsureDir(dir)
-	if err != nil && !errors.Is(err, ErrQuarantined) {
-		t.Fatal(err)
+	if err != nil || !changed || !Matches(secOf(t, dir)) {
+		t.Fatalf("changed=%v err=%v segurança %v", changed, err, secOf(t, dir))
 	}
-	if !changed || !Matches(secOf(t, dir)) {
-		t.Fatalf("changed=%v segurança %v", changed, secOf(t, dir))
+	if m, _ := filepath.Glob(dir + ".naoconfiavel-*"); len(m) != 0 {
+		t.Fatalf("não deveria pôr de lado: %v", m)
 	}
 }
 
@@ -199,4 +199,27 @@ func TestWindowsEnsureDirRootDeniesSystem(t *testing.T) {
 
 	changed, err := New().EnsureDir(dir)
 	quarantined(t, dir, changed, err)
+}
+
+// Raiz com DACL que nega tudo a Todos e contém um arquivo: o rename de
+// quarentena precisa funcionar mesmo assim (SeBackup/SeRestore, por handle).
+func TestWindowsEnsureDirRootDeniesEveryone(t *testing.T) {
+	needAdmin(t)
+	dir := filepath.Join(t.TempDir(), "VPNMonitor")
+	if err := os.Mkdir(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "antigo.txt"), []byte("antigo"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	setDACL(t, dir, "D:P(D;OICI;FA;;;WD)", true)
+
+	changed, err := New().EnsureDir(dir)
+	side := quarantined(t, dir, changed, err)
+	// Devolve acesso ao diretório de lado para ler o conteúdo e permitir a limpeza.
+	t.Cleanup(func() { setDACL(t, side, "D:P(A;OICI;FA;;;BA)", true) })
+	setDACL(t, side, "D:P(A;OICI;FA;;;BA)", true)
+	if b, err := os.ReadFile(filepath.Join(side, "antigo.txt")); err != nil || string(b) != "antigo" {
+		t.Fatalf("conteúdo antigo deveria estar preservado: %q %v", b, err)
+	}
 }

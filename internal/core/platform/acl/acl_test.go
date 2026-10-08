@@ -7,6 +7,7 @@ func TestMatches(t *testing.T) {
 		DirSDDL: true,
 		"O:BAG:SYD:PAI(A;OICI;FA;;;BA)(A;OICI;FA;;;SY)":                 true,
 		"O:BAD:PAI(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)S:AI":                 true,
+		"O:SYD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)":                       true,  // dono SYSTEM
 		"D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)":                           false, // sem dono
 		"O:S-1-5-21-1-2-3-1001D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)":      false, // usuário que pré-criou é dono
 		"O:BAD:AI(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)":                      false, // herança ligada

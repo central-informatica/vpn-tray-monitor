@@ -29,7 +29,9 @@ func TestDecide(t *testing.T) {
 		{"filho DACL vazia", root, []Entry{with(good("a"), func(e *Entry) { e.SDDL = "O:BAD:AI" })}, ActionQuarantine},
 		{"filho sem DACL", root, []Entry{with(good("a"), func(e *Entry) { e.SDDL = "O:BA" })}, ActionQuarantine},
 		{"raiz vazia, DACL errada, dono BA", with(root, func(e *Entry) { e.SDDL = "O:BAD:AI(A;OICI;FA;;;SY)" }), nil, ActionReapplyRoot},
-		{"raiz vazia, dono SYSTEM", with(root, func(e *Entry) { e.SDDL = "O:SYD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)" }), nil, ActionReapplyRoot},
+		{"raiz vazia, dono SYSTEM, DACL certa", with(root, func(e *Entry) { e.SDDL = "O:SYD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)" }), nil, ActionOK},
+		{"raiz com conteúdo, dono SYSTEM, DACL certa", with(root, func(e *Entry) { e.SDDL = "O:SYD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)" }), []Entry{good("a")}, ActionOK},
+		{"raiz vazia, dono SYSTEM, DACL errada", with(root, func(e *Entry) { e.SDDL = "O:SYD:AI(A;OICI;FA;;;SY)" }), nil, ActionReapplyRoot},
 		{"raiz vazia, dono usuário", with(root, func(e *Entry) { e.SDDL = "O:S-1-5-21-1-2-3-1001D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)" }), nil, ActionQuarantine},
 		{"raiz com conteúdo, DACL errada", with(root, func(e *Entry) { e.SDDL = "O:BAD:P(D;OICI;FA;;;SY)(A;OICI;FA;;;BA)" }), []Entry{good("a")}, ActionQuarantine},
 	}

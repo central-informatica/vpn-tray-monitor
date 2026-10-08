@@ -73,8 +73,7 @@ func (s winSecurer) fix(path string, d Decision) (notice, err error) {
 		d = Decision{ActionQuarantine, fmt.Sprintf("%s; reaplicar falhou: %v", d.Reason, rerr)}
 	}
 	dest := fmt.Sprintf("%s.naoconfiavel-%s", path, time.Now().Format("20060102-150405.000000000"))
-	// os.Rename de um link renomeia o link, não o alvo.
-	if err := os.Rename(path, dest); err != nil {
+	if err := s.quarantineRename(path, dest); err != nil {
 		return nil, fmt.Errorf("pondo %s de lado (%s): %w", path, d.Reason, err)
 	}
 	if err := createRoot(path); err != nil {
@@ -206,4 +205,126 @@ func reapplyRoot(path string) error {
 	return windows.SetSecurityInfo(h, windows.SE_FILE_OBJECT,
 		windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION,
 		owner, nil, dacl, nil)
+}
+
+// quarantineRename renomeia por handle aberto sem seguir link (renomeia o
+// link, não o alvo), com SeBackup/SeRestore ligados só durante a operação:
+// os.Rename abriria a origem com DELETE|SYNCHRONIZE, que uma DACL hostil na
+// raiz pode negar.
+func (s winSecurer) quarantineRename(path, dest string) error {
+	defer s.enableBackupRestore()()
+	abs, err := filepath.Abs(dest)
+	if err != nil {
+		return err
+	}
+	src, err := windows.UTF16PtrFromString(path)
+	if err != nil {
+		return err
+	}
+	h, err := windows.CreateFile(src, windows.DELETE|windows.SYNCHRONIZE,
+		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE, nil,
+		windows.OPEN_EXISTING,
+		windows.FILE_FLAG_BACKUP_SEMANTICS|windows.FILE_FLAG_OPEN_REPARSE_POINT, 0)
+	if err != nil {
+		return fmt.Errorf("abrindo %s para renomear: %w", path, err)
+	}
+	defer windows.CloseHandle(h)
+
+	// FILE_RENAME_INFO: ReplaceIfExists (BOOLEAN, preenchido até o alinhamento),
+	// RootDirectory, FileNameLength (bytes, sem o NUL) e FileName.
+	type renameInfo struct {
+		ReplaceIfExists uint32
+		RootDirectory   windows.Handle
+		FileNameLength  uint32
+		FileName        [1]uint16
+	}
+	name := windows.StringToUTF16(abs) // com NUL
+	size := int(unsafe.Offsetof(renameInfo{}.FileName)) + len(name)*2
+	buf := make([]uint64, (size+7)/8) // alinhado para o ponteiro
+	ri := (*renameInfo)(unsafe.Pointer(&buf[0]))
+	ri.FileNameLength = uint32((len(name) - 1) * 2)
+	copy(unsafe.Slice(&ri.FileName[0], len(name)), name)
+	if err := windows.SetFileInformationByHandle(h, windows.FileRenameInfo, (*byte)(unsafe.Pointer(ri)), uint32(size)); err != nil {
+		return fmt.Errorf("renomeando %s para %s: %w", path, abs, err)
+	}
+	return nil
+}
+
+var backupRestorePrivs = []string{"SeBackupPrivilege", "SeRestorePrivilege"}
+
+// enableBackupRestore liga SeBackup/SeRestore no token do processo e devolve
+// a função que restaura o estado anterior. Sem poder ligar (processo não
+// elevado), registra e segue sem eles.
+func (s winSecurer) enableBackupRestore() (restore func()) {
+	restore = func() {}
+	var tok windows.Token
+	if err := windows.OpenProcessToken(windows.CurrentProcess(), windows.TOKEN_ADJUST_PRIVILEGES|windows.TOKEN_QUERY, &tok); err != nil {
+		s.log("abrindo o token do processo: %v", err)
+		return restore
+	}
+	var enabled []windows.LUID
+	for _, name := range backupRestorePrivs {
+		var luid windows.LUID
+		if err := windows.LookupPrivilegeValue(nil, windows.StringToUTF16Ptr(name), &luid); err != nil {
+			s.log("privilégio %s desconhecido: %v", name, err)
+			continue
+		}
+		present, on := tokenPrivilege(tok, luid)
+		switch {
+		case !present:
+			s.log("privilégio %s ausente do token; seguindo sem ele", name)
+		case on:
+			// já estava ligado: não mexe nem restaura
+		default:
+			if setPrivilege(tok, luid, true) != nil {
+				s.log("não foi possível habilitar %s; seguindo sem ele", name)
+				continue
+			}
+			if _, on := tokenPrivilege(tok, luid); !on { // confirma relendo o token
+				s.log("%s não ficou habilitado; seguindo sem ele", name)
+				continue
+			}
+			enabled = append(enabled, luid)
+		}
+	}
+	return func() {
+		for _, luid := range enabled {
+			_ = setPrivilege(tok, luid, false)
+		}
+		tok.Close()
+	}
+}
+
+func setPrivilege(tok windows.Token, luid windows.LUID, on bool) error {
+	tp := windows.Tokenprivileges{PrivilegeCount: 1}
+	tp.Privileges[0].Luid = luid
+	if on {
+		tp.Privileges[0].Attributes = windows.SE_PRIVILEGE_ENABLED
+	}
+	return windows.AdjustTokenPrivileges(tok, false, &tp, 0, nil, nil)
+}
+
+// tokenPrivilege lê do token se o privilégio existe e se está habilitado.
+func tokenPrivilege(tok windows.Token, luid windows.LUID) (present, enabled bool) {
+	var n uint32
+	_ = windows.GetTokenInformation(tok, windows.TokenPrivileges, nil, 0, &n)
+	if n == 0 {
+		return false, false
+	}
+	buf := make([]uint64, (n+7)/8)
+	if err := windows.GetTokenInformation(tok, windows.TokenPrivileges, (*byte)(unsafe.Pointer(&buf[0])), n, &n); err != nil {
+		return false, false
+	}
+	for _, p := range (*windows.Tokenprivileges)(unsafe.Pointer(&buf[0])).AllPrivileges() {
+		if p.Luid == luid {
+			return true, p.Attributes&windows.SE_PRIVILEGE_ENABLED != 0
+		}
+	}
+	return false, false
+}
+
+func (s winSecurer) log(format string, args ...any) {
+	if s.logf != nil {
+		s.logf(format, args...)
+	}
 }
