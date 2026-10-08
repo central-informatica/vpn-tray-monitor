@@ -65,9 +65,9 @@ func hashOf(b []byte) string {
 
 // fileHash é a impressão digital de um arquivo para o PollWatcher ("" se
 // ilegível ou ausente).
-func fileHash(path string) func() string {
+func fileHash(read func(string) ([]byte, error), path string) func() string {
 	return func() string {
-		b, err := os.ReadFile(path)
+		b, err := read(path)
 		if err != nil {
 			return ""
 		}
@@ -90,8 +90,8 @@ func sleepCtx(ctx context.Context, clock shared.Clock, d time.Duration) bool {
 // readConfigRetry lê config.json repetindo as falhas que não são "não
 // existe" (violação de compartilhamento).
 // Parada pedida durante as esperas devolve ctx.Err().
-func readConfigRetry(ctx context.Context, clock shared.Clock, path string) ([]byte, error) {
-	data, err := os.ReadFile(path)
+func readConfigRetry(ctx context.Context, clock shared.Clock, read func(string) ([]byte, error), path string) ([]byte, error) {
+	data, err := read(path)
 	for _, d := range configRetryDelays {
 		if err == nil || errors.Is(err, fs.ErrNotExist) {
 			break
@@ -99,7 +99,7 @@ func readConfigRetry(ctx context.Context, clock shared.Clock, path string) ([]by
 		if !sleepCtx(ctx, clock, d) {
 			return nil, ctx.Err()
 		}
-		data, err = os.ReadFile(path)
+		data, err = read(path)
 	}
 	return data, err
 }
@@ -120,8 +120,8 @@ func waitTimeout(wg *sync.WaitGroup, d time.Duration) bool {
 // lidos (ou gravados pelo seed), dos quais o orquestrador guarda o hash. Se o
 // arquivo não existe, gera pelo seed. Com erro, data traz o que foi lido
 // (pode ser nil) e o arquivo nunca é sobrescrito.
-func loadStartupConfig(ctx context.Context, clock shared.Clock, path string, seed config.SeedReader) (cfg config.Config, data []byte, boot config.Bootstrap, err error) {
-	data, err = readConfigRetry(ctx, clock, path)
+func loadStartupConfig(ctx context.Context, clock shared.Clock, read func(string) ([]byte, error), path string, seed config.SeedReader) (cfg config.Config, data []byte, boot config.Bootstrap, err error) {
+	data, err = readConfigRetry(ctx, clock, read, path)
 	if errors.Is(err, fs.ErrNotExist) {
 		cfg, boot, err = config.LoadOrCreate(path, seed)
 		if err != nil {
@@ -133,7 +133,7 @@ func loadStartupConfig(ctx context.Context, clock shared.Clock, path string, see
 		}
 		// Outro processo criou o arquivo entre as duas leituras: lê de novo
 		// para guardar o hash do que está em disco.
-		data, err = readConfigRetry(ctx, clock, path)
+		data, err = readConfigRetry(ctx, clock, read, path)
 	}
 	if err != nil {
 		return config.Config{}, nil, boot, err
@@ -235,7 +235,11 @@ func serve(ctx context.Context, p Platform, l layout, clock shared.Clock, ready 
 		log.Info("segurança da pasta de dados corrigida", "pasta", l.Dir)
 	}
 
-	cfg, cfgData, boot, cfgErr := loadStartupConfig(ctx, clock, l.ConfigFile, p.ReadSeed)
+	readFile := p.ReadFile
+	if readFile == nil {
+		readFile = os.ReadFile
+	}
+	cfg, cfgData, boot, cfgErr := loadStartupConfig(ctx, clock, readFile, l.ConfigFile, p.ReadSeed)
 	if ctx.Err() != nil {
 		// Parada pedida durante a partida (ex.: repetindo a leitura do
 		// config.json): sai sem subir nada e sem o falso "inválido".
@@ -274,6 +278,7 @@ func serve(ctx context.Context, p Platform, l layout, clock shared.Clock, ready 
 		Link:   adapters.LinkProber{RAS: p.RAS, Net: p.Net},
 		Dialer: &adapters.Dialer{RAS: p.RAS, Creds: creds, Clock: clock},
 		Creds:  creds, Log: log, Events: p.Events, Rand: rand.Float64, OnGlobals: applyGlobals,
+		ReadFile: readFile,
 	}, cfg, st)
 	if cfgErr == nil {
 		// Em toda partida, não só no seed: o observador não recarrega o que
@@ -289,7 +294,7 @@ func serve(ctx context.Context, p Platform, l layout, clock shared.Clock, ready 
 	var wg sync.WaitGroup
 	wctx, wcancel := context.WithCancel(ctx)
 	defer wcancel()
-	cfgProbe := fileHash(l.ConfigFile)
+	cfgProbe := fileHash(readFile, l.ConfigFile)
 	baseline := make(chan struct{})
 	var baselineOnce sync.Once
 	cfgWatch := shared.NewPollWatcher(clock, 250*time.Millisecond, time.Second, func() string {

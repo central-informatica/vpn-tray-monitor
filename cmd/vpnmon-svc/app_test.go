@@ -3,11 +3,13 @@ package main
 import (
 	"context"
 	"errors"
+	"io/fs"
 	"net"
 	"os"
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -67,6 +69,7 @@ func startServiceRAS(t *testing.T, te *testEnv, r *fake.RAS) *testService {
 	}
 	p := testPlatform(ts.ras, ts.events, ts.acl)
 	p.Listen = func() (net.Listener, error) { return ln, nil }
+	p.ReadFile = te.readFile
 	te.platform = func() (Platform, error) { return p, nil }
 	te.dial = func(ctx context.Context) (*ipc.Client, error) {
 		c, err := net.Dial("tcp", ln.Addr().String())
@@ -386,17 +389,15 @@ func TestServeStopsWithErrorWhenPipeDies(t *testing.T) {
 // Parada pedida enquanto a partida ainda repete a leitura do config.json:
 // sai limpo, sem o falso "config.json inválido" e sem subir o orquestrador.
 func TestServeCancelledDuringStartupConfigRead(t *testing.T) {
-	if os.Geteuid() == 0 {
-		t.Skip("root lê arquivo sem permissão")
-	}
 	te := newTestEnv(t)
 	te.writeConfig(t, "Matriz")
 	path := filepath.Join(te.dir, "config.json")
-	_ = os.Chmod(path, 0)
-	t.Cleanup(func() { _ = os.Chmod(path, 0o600) })
 	r := fake.NewRAS("VPN Matriz")
 	events := &logging.RecordingSink{}
 	p := testPlatform(r, events, &fake.ACL{})
+	var unreadable atomic.Bool
+	unreadable.Store(true)
+	p.ReadFile = sharingViolation(path, &unreadable)
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -440,23 +441,33 @@ func TestServeConfigRemovedWarnsImmediately(t *testing.T) {
 	}
 }
 
-func TestServeRetriesUnreadableConfig(t *testing.T) {
-	if os.Geteuid() == 0 {
-		t.Skip("root lê arquivo sem permissão")
+// sharingViolation simula, de forma portátil, o arquivo segurado por outro
+// processo (no Windows, chmod não o torna ilegível): enquanto on, ler path
+// falha com um erro que não é "não existe".
+func sharingViolation(path string, on *atomic.Bool) func(string) ([]byte, error) {
+	return func(name string) ([]byte, error) {
+		if on.Load() && filepath.Clean(name) == filepath.Clean(path) {
+			return nil, &fs.PathError{Op: "open", Path: name, Err: errors.New("violação de compartilhamento (simulada)")}
+		}
+		return os.ReadFile(name)
 	}
+}
+
+func TestServeRetriesUnreadableConfig(t *testing.T) {
 	old := configRetryDelays
 	configRetryDelays = []time.Duration{200 * time.Millisecond, 200 * time.Millisecond, 200 * time.Millisecond, 200 * time.Millisecond}
 	t.Cleanup(func() { configRetryDelays = old })
 	te := newTestEnv(t)
 	te.writeConfig(t, "Matriz")
-	ts := startService(t, te)
 	path := filepath.Join(te.dir, "config.json")
+	var unreadable atomic.Bool
+	te.readFile = sharingViolation(path, &unreadable)
+	ts := startService(t, te)
 	logHas := func(s string) bool {
 		b, _ := os.ReadFile(filepath.Join(te.dir, "logs", "vpnmon.log"))
 		return strings.Contains(string(b), s)
 	}
 	time.Sleep(500 * time.Millisecond) // linha de base do observador já tomada
-	t.Cleanup(func() { _ = os.Chmod(path, 0o600) })
 
 	// Ilegível por pouco tempo (violação de compartilhamento): a nova
 	// tentativa recarrega sem aviso.
@@ -467,9 +478,9 @@ func TestServeRetriesUnreadableConfig(t *testing.T) {
 	}
 	data, _ := config.Marshal(c)
 	_ = os.WriteFile(path, data, 0o600)
-	_ = os.Chmod(path, 0)
+	unreadable.Store(true)
 	waitFor(t, func() bool { return logHas("nova tentativa") })
-	_ = os.Chmod(path, 0o600)
+	unreadable.Store(false)
 	waitFor(t, func() bool { return len(ts.o.Status().VPNs) == 2 })
 	if hasEvent(ts.events.Snapshot(), "warning", "não foi possível ler config.json") {
 		t.Fatalf("falha passageira não vai ao Event Log: %+v", ts.events.Snapshot())
@@ -479,7 +490,7 @@ func TestServeRetriesUnreadableConfig(t *testing.T) {
 	time.Sleep(500 * time.Millisecond) // o observador amostra o arquivo de novo legível
 	data, _ = config.Marshal(config.Empty())
 	_ = os.WriteFile(path, data, 0o600)
-	_ = os.Chmod(path, 0)
+	unreadable.Store(true)
 	waitFor(t, func() bool { return hasEvent(ts.events.Snapshot(), "warning", "não foi possível ler config.json") })
 	if n := len(ts.o.Status().VPNs); n != 2 {
 		t.Fatalf("config anterior deveria valer: %d VPNs", n)

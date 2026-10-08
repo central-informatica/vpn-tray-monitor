@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
-	"os"
 	"slices"
 	"strings"
 
@@ -60,7 +59,7 @@ func (o *Orchestrator) mutate(f func(c *config.Config) error) error {
 	}
 	// Uma edição manual ainda não recarregada (o observador espera o arquivo
 	// assentar) seria apagada pela gravação: recusa até a recarga.
-	if cur, err := os.ReadFile(o.opts.Paths.ConfigFile); err == nil {
+	if cur, err := o.opts.ReadFile(o.opts.Paths.ConfigFile); err == nil {
 		o.mu.Lock()
 		changed := hashBytes(cur) != o.lastWritten
 		o.mu.Unlock()
@@ -228,7 +227,7 @@ func (o *Orchestrator) ReloadFromDisk() error {
 	if stopped {
 		return nil
 	}
-	data, err := os.ReadFile(o.opts.Paths.ConfigFile)
+	data, err := o.opts.ReadFile(o.opts.Paths.ConfigFile)
 	if err != nil {
 		return fmt.Errorf("lendo config.json: %w", err)
 	}

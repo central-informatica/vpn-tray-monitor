@@ -24,6 +24,9 @@ type testEnv struct {
 	env
 	out, errb *bytes.Buffer
 	dir       string
+	// readFile, se não nil, substitui a leitura de arquivos do serviço
+	// (Platform.ReadFile) em startService.
+	readFile func(string) ([]byte, error)
 }
 
 func newTestEnv(t *testing.T) *testEnv {

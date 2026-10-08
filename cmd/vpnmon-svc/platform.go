@@ -26,4 +26,8 @@ type Platform struct {
 	Listen   func() (net.Listener, error)
 	Events   logging.EventSink
 	ReadSeed config.SeedReader
+	// ReadFile lê config.json (partida, observador e recarga); nil =
+	// os.ReadFile. Os testes simulam com ele a violação de compartilhamento
+	// do Windows, onde chmod não torna o arquivo ilegível.
+	ReadFile func(string) ([]byte, error)
 }

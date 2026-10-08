@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"os"
 	"runtime/debug"
 	"strings"
 	"sync"
@@ -42,6 +43,9 @@ type Options struct {
 	Rand    func() float64
 	// OnGlobals aplica logLevel e limites de log quando a config muda.
 	OnGlobals func(config.Config)
+	// ReadFile lê config.json (recarga e conferência antes de gravar); nil =
+	// os.ReadFile.
+	ReadFile func(string) ([]byte, error)
 	// RestartDelay é a espera antes de recriar um supervisor que entrou em
 	// pânico (dobra a cada repetição, até 60 s). Padrão 5 s.
 	RestartDelay time.Duration
@@ -135,6 +139,9 @@ func New(opts Options, cfg config.Config, st config.State) *Orchestrator {
 	}
 	if opts.Clock == nil {
 		opts.Clock = shared.RealClock{}
+	}
+	if opts.ReadFile == nil {
+		opts.ReadFile = os.ReadFile
 	}
 	if opts.RestartDelay == 0 {
 		opts.RestartDelay = 5 * time.Second
