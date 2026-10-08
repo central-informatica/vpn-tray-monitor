@@ -41,6 +41,11 @@ func TestParseRejects(t *testing.T) {
 		"mode: set\nlixo\n",
 		"mode: set\na.go:1.1,2.2 x 1\n",
 		"mode: set\na.go:1.1,2.2 1 -1\n",
+		"mode: set\n",
+		"mode: set\n\n",
+		"mode: bogus\na.go:1.1,2.2 1 1\n",
+		"mode:set\na.go:1.1,2.2 1 1\n",
+		"mode: set\nx/a_windows.go:1.1,2.2 1 1\n",
 	} {
 		if _, _, err := Parse(strings.NewReader(in)); err == nil {
 			t.Errorf("%q aceito", in)
@@ -81,5 +86,45 @@ func TestRunGate(t *testing.T) {
 	}
 	if code := run([]string{"extra"}, &out, &errb); code != 2 {
 		t.Fatalf("argumento extra: %d", code)
+	}
+}
+
+func TestParseModesAndWindowsFilter(t *testing.T) {
+	in := "mode: atomic\nm/p/a.go:1.1,2.2 4 7\nm/p/b.go:1.1,2.2 1 0\nm/p/x_windows.go:1.1,2.2 50 0\n"
+	pkgs, total, err := Parse(strings.NewReader(in))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pkgs) != 1 || pkgs[0] != (PkgCover{"m/p", 4, 5}) || total.Percent() != 80 {
+		t.Fatalf("%+v %+v", pkgs, total)
+	}
+	if _, _, err := Parse(strings.NewReader("mode: count\nm/p/a.go:1.1,2.2 2 3\n")); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestMarkdownModulePrefix(t *testing.T) {
+	md := Markdown([]PkgCover{{"mod/x", 1, 1}, {"mod", 1, 1}, {"modulo/y", 1, 1}}, PkgCover{"total", 3, 3}, "mod", 80)
+	for _, w := range []string{"| `x` |", "| `.` |", "| `modulo/y` |"} {
+		if !strings.Contains(md, w) {
+			t.Errorf("falta %q em %q", w, md)
+		}
+	}
+}
+
+func TestRunExactFloorAndBadMin(t *testing.T) {
+	dir := t.TempDir()
+	prof := filepath.Join(dir, "c.out")
+	if err := os.WriteFile(prof, []byte("mode: set\nm/p/a.go:1.1,2.2 4 1\nm/p/b.go:1.1,2.2 1 0\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var out, errb bytes.Buffer
+	if code := run([]string{"-min", "80", "-profile", prof}, &out, &errb); code != 0 {
+		t.Fatalf("piso exato: %d %q", code, errb.String())
+	}
+	for _, m := range []string{"NaN", "-1", "100.5"} {
+		if code := run([]string{"-min", m, "-profile", prof}, &out, &errb); code != 2 {
+			t.Errorf("-min %s: %d", m, code)
+		}
 	}
 }

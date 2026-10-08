@@ -9,6 +9,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"math"
 	"os"
 )
 
@@ -24,6 +25,10 @@ func run(args []string, stdout, stderr io.Writer) int {
 	summary := fs.String("summary", "", "acrescenta a tabela a este arquivo (ex.: $GITHUB_STEP_SUMMARY)")
 	if err := fs.Parse(args); err != nil || fs.NArg() != 0 {
 		fmt.Fprintln(stderr, "uso: covergate [-min 80] [-profile coverage.out] [-summary arquivo]")
+		return 2
+	}
+	if math.IsNaN(*minPct) || *minPct < 0 || *minPct > 100 {
+		fmt.Fprintln(stderr, "erro: -min deve estar entre 0 e 100")
 		return 2
 	}
 	f, err := os.Open(*profile)

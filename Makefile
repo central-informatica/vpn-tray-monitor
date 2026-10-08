@@ -28,7 +28,9 @@ test:
 # tray/viewmodel (§10.1); os fakes ficam de fora e os *_windows.go nem
 # compilam no Linux (são cobertos pelo job Windows).
 cover:
-	go test -coverprofile=coverage.out $$(go list $(COVER_PKGS) | grep -v /platform/fake)
+	pkgs=$$(go list $(COVER_PKGS)) && pkgs=$$(printf '%s\n' "$$pkgs" | grep -v /platform/fake) && [ -n "$$pkgs" ] \
+		|| { echo "cover: lista de pacotes vazia ou go list falhou" >&2; exit 1; }; \
+	go test -coverprofile=coverage.out $$pkgs && \
 	go run ./tools/covergate -min 80 -profile coverage.out $(if $(GITHUB_STEP_SUMMARY),-summary "$(GITHUB_STEP_SUMMARY)")
 
 # O view-model da bandeja tem piso próprio de 80 % (Marco B).

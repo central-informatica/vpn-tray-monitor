@@ -39,10 +39,13 @@ func Parse(r io.Reader) ([]PkgCover, PkgCover, error) {
 		line := strings.TrimSpace(sc.Text())
 		if first {
 			first = false
-			if !strings.HasPrefix(line, "mode: ") {
-				return nil, PkgCover{}, fmt.Errorf("linha 1: esperava \"mode: …\", veio %q", line)
+			switch strings.TrimPrefix(line, "mode: ") {
+			case "set", "count", "atomic":
+				if strings.HasPrefix(line, "mode: ") {
+					continue
+				}
 			}
-			continue
+			return nil, PkgCover{}, fmt.Errorf("linha 1: esperava \"mode: set|count|atomic\", veio %q", line)
 		}
 		if line == "" {
 			continue
@@ -57,6 +60,10 @@ func Parse(r io.Reader) ([]PkgCover, PkgCover, error) {
 		if err1 != nil || err2 != nil || stmts < 0 || count < 0 {
 			return nil, PkgCover{}, fmt.Errorf("linha %d malformada: %q", n, line)
 		}
+		// Arquivos _windows.go ficam de fora do piso (§10.1), em qualquer SO.
+		if file := f[0][:strings.LastIndex(f[0], ":")]; strings.HasSuffix(file, "_windows.go") {
+			continue
+		}
 		b := blocks[f[0]]
 		b.stmts = stmts
 		b.covered = b.covered || count > 0
@@ -67,6 +74,9 @@ func Parse(r io.Reader) ([]PkgCover, PkgCover, error) {
 	}
 	if first {
 		return nil, PkgCover{}, fmt.Errorf("perfil vazio")
+	}
+	if len(blocks) == 0 {
+		return nil, PkgCover{}, fmt.Errorf("perfil sem instruções")
 	}
 	byPkg := map[string]*PkgCover{}
 	total := PkgCover{Pkg: "total"}
@@ -98,8 +108,8 @@ func Markdown(pkgs []PkgCover, total PkgCover, module string, min float64) strin
 	var b strings.Builder
 	fmt.Fprintf(&b, "### Cobertura (mínimo %.0f %% no total)\n\n| Pacote | Cobertura |\n|---|---:|\n", min)
 	for _, p := range pkgs {
-		name := strings.TrimPrefix(strings.TrimPrefix(p.Pkg, module), "/")
-		if name == "" {
+		name := strings.TrimPrefix(p.Pkg, module+"/")
+		if name == module {
 			name = "."
 		}
 		fmt.Fprintf(&b, "| `%s` | %.1f %% |\n", name, p.Percent())
