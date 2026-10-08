@@ -10,7 +10,11 @@ import (
 	"github.com/guibsu/vpn-tray-monitor/internal/features/tray/client"
 )
 
+// late é depois da janela de agregação dos balões; o relógio do VM é fixo em now.
+var late = now.Add(2 * balloonWindow)
+
 func connected(vm *VM, vpns ...ipc.VPNView) {
+	vm.clock = func() time.Time { return now }
 	vm.Apply(client.Event{Kind: client.EvConn, Conn: client.Conn{State: client.Connected, ServerVersion: "2.0.0"}})
 	vm.Apply(client.Event{Kind: client.EvSnapshot, Snapshot: ipc.Snapshot{VPNs: vpns, Notifications: true}})
 }
@@ -206,7 +210,7 @@ func notice(vpn, kind string) client.Event {
 func TestBalloons(t *testing.T) {
 	vm := New("2.0.0")
 	connected(vm, ipc.VPNView{Name: "Matriz", State: ipc.StateConectada})
-	if _, ok := vm.TakeBalloon(); ok {
+	if _, ok := vm.TakeBalloon(late); ok {
 		t.Fatal("sem avisos, sem balão")
 	}
 	// Um aviso: o texto do serviço, com o ícone do tipo.
@@ -216,22 +220,22 @@ func TestBalloons(t *testing.T) {
 	}{{"down", BalloonWarning}, {"up", BalloonInfo}, {"credential", BalloonError}, {"config", BalloonError}, {"novo", BalloonInfo}}
 	for _, c := range single {
 		vm.Apply(notice("Matriz", c.kind))
-		b, ok := vm.TakeBalloon()
+		b, ok := vm.TakeBalloon(late)
 		if !ok || b.Kind != c.want || b.Title != "VPN Monitor" || b.Text != "VPN Matriz "+c.kind {
 			t.Errorf("%s: %+v", c.kind, b)
 		}
 	}
-	vm.Apply(client.Event{Kind: client.EvNotice, Notice: ipc.NoticeEvent{VPN: "M", Kind: "down", Text: strings.Repeat("y", 400)}})
-	if b, _ := vm.TakeBalloon(); len([]rune(b.Text)) > maxBalloon {
-		t.Fatalf("texto longo: %d", len([]rune(b.Text)))
+	vm.Apply(client.Event{Kind: client.EvNotice, Notice: ipc.NoticeEvent{VPN: "M", Kind: "down", Text: strings.Repeat("😀", 200)}})
+	if b, _ := vm.TakeBalloon(late); len(utf16.Encode([]rune(b.Text))) > maxBalloon || !strings.HasSuffix(b.Text, "…") {
+		t.Fatalf("texto longo: %d unidades", len(utf16.Encode([]rune(b.Text))))
 	}
-	if _, ok := vm.TakeBalloon(); ok {
+	if _, ok := vm.TakeBalloon(late); ok {
 		t.Fatal("TakeBalloon esvazia a fila")
 	}
 	// notifications=false no snapshot: só log, sem balão.
 	vm.Apply(client.Event{Kind: client.EvSnapshot, Snapshot: ipc.Snapshot{Notifications: false}})
 	vm.Apply(notice("Matriz", "down"))
-	if _, ok := vm.TakeBalloon(); ok {
+	if _, ok := vm.TakeBalloon(late); ok {
 		t.Fatal("avisos desligados")
 	}
 }
@@ -261,10 +265,45 @@ func TestBalloonsAggregate(t *testing.T) {
 		for _, ev := range c.in {
 			vm.Apply(ev)
 		}
-		b, ok := vm.TakeBalloon()
+		b, ok := vm.TakeBalloon(late)
 		if !ok || b.Title != c.title || b.Text != c.text || b.Kind != c.kind {
 			t.Errorf("%s: %+v", c.name, b)
 		}
+	}
+}
+
+// O ciclo real da view: Apply conforme os eventos chegam, TakeBalloon no tique.
+func TestBalloonWindow(t *testing.T) {
+	vm := New("2.0.0")
+	connected(vm)
+	vm.Apply(notice("A", "down"))
+	if _, ok := vm.TakeBalloon(now); ok {
+		t.Fatal("cedo demais")
+	}
+	vm.Apply(notice("B", "down"))
+	vm.Apply(notice("C", "down"))
+	if _, ok := vm.TakeBalloon(now.Add(balloonWindow - time.Millisecond)); ok {
+		t.Fatal("ainda dentro da janela")
+	}
+	b, ok := vm.TakeBalloon(now.Add(balloonWindow))
+	if !ok || b.Text != "3 VPNs caíram: A, B, C" {
+		t.Fatalf("%+v", b)
+	}
+}
+
+func TestPendingDroppedOnDisableAndDisconnect(t *testing.T) {
+	vm := New("2.0.0")
+	connected(vm)
+	vm.Apply(notice("A", "down"))
+	vm.Apply(client.Event{Kind: client.EvSnapshot, Snapshot: ipc.Snapshot{Notifications: false}})
+	if _, ok := vm.TakeBalloon(late); ok {
+		t.Fatal("avisos desligados limpam a fila")
+	}
+	connected(vm)
+	vm.Apply(notice("A", "down"))
+	vm.Apply(client.Event{Kind: client.EvConn, Conn: client.Conn{State: client.Unavailable}})
+	if _, ok := vm.TakeBalloon(late); ok {
+		t.Fatal("queda da conexão limpa a fila")
 	}
 }
 

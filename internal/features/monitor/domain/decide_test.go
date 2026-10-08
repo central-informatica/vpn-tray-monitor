@@ -148,6 +148,14 @@ func TestReachOKResetsAndReportsLatency(t *testing.T) {
 	}
 }
 
+func TestReachOKZeroRTTStaysPositive(t *testing.T) {
+	s := st(Conectada, withOp(OpProbeReach))
+	d := Decide(s, Input{Kind: InReachResult, ReachOK: true, RTT: 0}, params(), env(0))
+	if d.Next.LastRTT != time.Microsecond {
+		t.Fatalf("%v", d.Next.LastRTT)
+	}
+}
+
 func dialErr(code uint32) *DialError {
 	return &DialError{Class: ras.Classify(code), Code: code, Message: "msg"}
 }

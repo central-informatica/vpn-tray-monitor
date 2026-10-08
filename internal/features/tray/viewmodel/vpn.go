@@ -186,9 +186,6 @@ func mainLine(v ipc.VPNView, now time.Time) string {
 			parts = append(parts, "só enlace")
 		} else if v.LatencyMs > 0 {
 			parts = append(parts, fmt.Sprintf("%s %d ms", v.CheckKind, v.LatencyMs))
-		} else if v.LastCheckUnix > 0 {
-			// Latência 0 com verificação feita: abaixo de 1 ms, não "sem dado".
-			parts = append(parts, v.CheckKind+" <1 ms")
 		}
 	case ipc.StateDegradada:
 		if v.Failures > 0 {
@@ -250,9 +247,27 @@ func details(v ipc.VPNView, now time.Time) []string {
 	return lines
 }
 
-// CredentialCommand é o comando que grava a credencial de uma VPN.
+// CredentialCommand é o comando que grava a credencial de uma VPN. O nome vai
+// entre aspas pelas regras do CommandLineToArgvW/CRT: as barras invertidas
+// antes de uma aspa (interna ou a de fechamento) são dobradas e a aspa
+// interna ganha uma barra.
 func CredentialCommand(vpn string) string {
-	return fmt.Sprintf(`vpnmon-svc credential set "%s" --user <usuário>`, strings.ReplaceAll(vpn, `"`, `\"`))
+	var b strings.Builder
+	slashes := 0
+	for _, r := range vpn {
+		switch r {
+		case '\\':
+			slashes++
+			b.WriteRune(r)
+			continue
+		case '"':
+			b.WriteString(strings.Repeat(`\`, slashes+1))
+		}
+		slashes = 0
+		b.WriteRune(r)
+	}
+	b.WriteString(strings.Repeat(`\`, slashes))
+	return `vpnmon-svc credential set "` + b.String() + `" --user <usuário>`
 }
 
 // vpnItem monta o submenu de uma VPN.

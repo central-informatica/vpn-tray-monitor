@@ -268,7 +268,8 @@ func onReach(d *Decision, in Input, p Params, env Env) {
 		return
 	}
 	if in.ReachOK {
-		d.Next.LastRTT = in.RTT
+		// O ICMP do Windows devolve 0 ms em LAN: alcance OK nunca vira "sem dado".
+		d.Next.LastRTT = max(in.RTT, time.Microsecond)
 		d.goUp(p, now)
 		d.Next.NextTick = now.Add(p.Interval)
 		return

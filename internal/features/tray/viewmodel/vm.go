@@ -15,6 +15,10 @@ const (
 	maxToolTip = 127
 	maxBalloon = 255
 	maxNotice  = 96
+
+	// balloonWindow é quanto o aviso pendente mais antigo espera antes de sair:
+	// avisos que chegam juntos (a rede caiu e levou várias VPNs) viram um balão.
+	balloonWindow = 1500 * time.Millisecond
 )
 
 // BalloonKind escolhe o ícone do balão.
@@ -67,11 +71,13 @@ type VM struct {
 	ras           []ipc.RasEntry
 	rasLoaded     bool
 	pending       []ipc.NoticeEvent
+	pendingSince  time.Time // chegada do aviso pendente mais antigo
+	clock         func() time.Time
 }
 
 // New cria o VM no estado "conectando".
 func New(appVersion string) *VM {
-	return &VM{appVersion: appVersion, conn: client.Conn{State: client.Connecting}, cfg: ipc.ConfigStatus{OK: true}}
+	return &VM{appVersion: appVersion, conn: client.Conn{State: client.Connecting}, cfg: ipc.ConfigStatus{OK: true}, clock: time.Now}
 }
 
 // Apply incorpora um evento do cliente.
@@ -85,10 +91,14 @@ func (vm *VM) Apply(ev client.Event) {
 		// o último aviso conhecido continua valendo.
 		vm.hasSnapshot = false
 		vm.vpns, vm.ras, vm.rasLoaded = nil, nil, false
+		vm.pending = nil
 	case client.EvSnapshot:
 		vm.hasSnapshot = true
 		vm.vpns = slices.Clone(ev.Snapshot.VPNs)
 		vm.notifications = ev.Snapshot.Notifications
+		if !vm.notifications {
+			vm.pending = nil
+		}
 		if ev.Snapshot.Config != nil {
 			vm.cfg = *ev.Snapshot.Config
 		}
@@ -101,6 +111,9 @@ func (vm *VM) Apply(ev client.Event) {
 		}
 	case client.EvNotice:
 		if vm.notifications {
+			if len(vm.pending) == 0 {
+				vm.pendingSince = vm.clock()
+			}
 			vm.pending = append(vm.pending, ev.Notice)
 		}
 	case client.EvConfigStatus:
@@ -138,11 +151,16 @@ func noticeGroup(kind string) int {
 	return len(noticeGroups) - 1
 }
 
-// TakeBalloon junta os avisos pendentes num balão só e esvazia a fila
-// (ok=false se não há). Um aviso sai com o texto do serviço; vários (ex.: a
+// TakeBalloon junta os avisos pendentes num balão só e esvazia a fila.
+// Só entrega quando o aviso mais antigo já espera balloonWindow (ok=false se
+// não há ou ainda é cedo): a view o chama a cada tique de 1 s, não após cada
+// Apply, e é isso que permite agregar uma rajada. Um aviso sai com o texto do serviço; vários (ex.: a
 // rede caiu e levou três VPNs) viram um resumo com o ícone do mais grave, em
 // vez de uma rajada de toasts que o Windows enfileiraria.
-func (vm *VM) TakeBalloon() (Balloon, bool) {
+func (vm *VM) TakeBalloon(now time.Time) (Balloon, bool) {
+	if len(vm.pending) == 0 || now.Sub(vm.pendingSince) < balloonWindow {
+		return Balloon{}, false
+	}
 	p := vm.pending
 	vm.pending = nil
 	switch len(p) {

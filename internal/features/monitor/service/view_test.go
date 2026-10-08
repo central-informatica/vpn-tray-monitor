@@ -56,3 +56,14 @@ func TestStateNamesMatchProtocol(t *testing.T) {
 		t.Error("classes de erro do protocolo divergem de ras.Class")
 	}
 }
+
+func TestToViewLatencyCeil(t *testing.T) {
+	v := config.VPN{Name: "M", Check: config.Check{Kind: config.CheckPing}}
+	cases := map[time.Duration]int64{0: 0, time.Microsecond: 1, time.Millisecond: 1, 1100 * time.Microsecond: 2, 12 * time.Millisecond: 12}
+	for rtt, want := range cases {
+		s := domain.Status{State: domain.Conectada, LastRTT: rtt}
+		if got := ToView(v, s, t0).LatencyMs; got != want {
+			t.Errorf("%v: %d, quer %d", rtt, got, want)
+		}
+	}
+}

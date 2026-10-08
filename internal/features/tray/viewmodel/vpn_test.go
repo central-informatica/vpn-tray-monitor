@@ -117,19 +117,24 @@ func TestVPNItemDetailTruncated(t *testing.T) {
 }
 
 func TestCredentialCommandQuotes(t *testing.T) {
-	if got := CredentialCommand(`Filial "A"`); got != `vpnmon-svc credential set "Filial \"A\"" --user <usuário>` {
-		t.Fatalf("%q", got)
+	cases := map[string]string{
+		`Filial "A"`: `Filial \"A\"`,
+		`Matriz\`:    `Matriz\\`,
+		`a\"b`:       `a\\\"b`,
+		`a\b`:        `a\b`,
+		`Matriz`:     `Matriz`,
+	}
+	for in, want := range cases {
+		if got := CredentialCommand(in); got != `vpnmon-svc credential set "`+want+`" --user <usuário>` {
+			t.Errorf("%q: %q", in, got)
+		}
 	}
 }
 
-func TestLatencySubMillisecond(t *testing.T) {
+func TestLatencyZeroOmitted(t *testing.T) {
 	v := ipc.VPNView{Name: "M", State: ipc.StateConectada, CheckKind: "ping", SinceUnix: ago(time.Minute), LastCheckUnix: ago(5 * time.Second)}
-	if got := vpnItem(v, now).Details[0]; got != "Conectada há 1 min · ping <1 ms" {
-		t.Fatalf("%q", got)
-	}
-	v.LastCheckUnix = 0
 	if got := vpnItem(v, now).Details[0]; got != "Conectada há 1 min" {
-		t.Fatalf("sem dado: %q", got)
+		t.Fatalf("%q", got)
 	}
 }
 
