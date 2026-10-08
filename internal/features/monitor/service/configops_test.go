@@ -433,7 +433,7 @@ func TestReloadReadErrorIsReturned(t *testing.T) {
 			got = ipc.DecodePayload(m.Payload, &st) == nil
 		}
 	}
-	if !got || st.OK || !strings.Contains(st.Message, "config.json") {
+	if !got || st.OK || !strings.Contains(st.Message, "config.json removido") {
 		t.Fatalf("configStatus: %v %+v", got, st)
 	}
 	if ev := h.events.Snapshot(); len(ev) == 0 || ev[len(ev)-1].Level != "warning" {

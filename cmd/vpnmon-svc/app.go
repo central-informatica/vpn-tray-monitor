@@ -9,7 +9,6 @@ import (
 	"io/fs"
 	"log/slog"
 	"math/rand/v2"
-	"net"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -35,16 +34,11 @@ import (
 // Esgotadas, o problema vai para o log, o Event Log e o configStatus.
 var configRetryDelays = []time.Duration{250 * time.Millisecond, 500 * time.Millisecond, time.Second, 2 * time.Second, 4 * time.Second}
 
-// Recriação do pipe quando o Accept falha sem parada pedida.
+// Prazos da parada, dentro dos 10 s que o SCM espera: o orquestrador usa
+// até 7 s; depois os observadores e o servidor do pipe.
 const (
-	listenRetryMin = 100 * time.Millisecond
-	listenRetryMax = 5 * time.Second
-	// listenHealthy é quanto o pipe precisa servir para a espera voltar ao
-	// mínimo e uma nova falha voltar a ir ao Event Log.
-	listenHealthy = time.Minute
-	// serverStopWait limita a espera pelo servidor do pipe na parada (o
-	// orquestrador já usou até 7 s dos 10 s que o SCM espera).
-	serverStopWait = 2 * time.Second
+	watchersStopWait = 500 * time.Millisecond
+	serverStopWait   = 2 * time.Second
 )
 
 // credBridge adapta features/credentials ao contrato do monitor (as
@@ -95,15 +89,31 @@ func sleepCtx(ctx context.Context, clock shared.Clock, d time.Duration) bool {
 
 // readConfigRetry lê config.json repetindo as falhas que não são "não
 // existe" (violação de compartilhamento).
+// Parada pedida durante as esperas devolve ctx.Err().
 func readConfigRetry(ctx context.Context, clock shared.Clock, path string) ([]byte, error) {
 	data, err := os.ReadFile(path)
 	for _, d := range configRetryDelays {
-		if err == nil || errors.Is(err, fs.ErrNotExist) || !sleepCtx(ctx, clock, d) {
+		if err == nil || errors.Is(err, fs.ErrNotExist) {
 			break
+		}
+		if !sleepCtx(ctx, clock, d) {
+			return nil, ctx.Err()
 		}
 		data, err = os.ReadFile(path)
 	}
 	return data, err
+}
+
+// waitTimeout espera wg por até d; false se estourou.
+func waitTimeout(wg *sync.WaitGroup, d time.Duration) bool {
+	done := make(chan struct{})
+	go func() { wg.Wait(); close(done) }()
+	select {
+	case <-done:
+		return true
+	case <-time.After(d):
+		return false
+	}
 }
 
 // loadStartupConfig carrega config.json na partida e devolve também os bytes
@@ -226,6 +236,12 @@ func serve(ctx context.Context, p Platform, l layout, clock shared.Clock, ready 
 	}
 
 	cfg, cfgData, boot, cfgErr := loadStartupConfig(ctx, clock, l.ConfigFile, p.ReadSeed)
+	if ctx.Err() != nil {
+		// Parada pedida durante a partida (ex.: repetindo a leitura do
+		// config.json): sai sem subir nada e sem o falso "inválido".
+		log.Info("parada pedida durante a partida")
+		return nil
+	}
 	if cfgErr != nil {
 		// Degrada em vez de cair: sobe sem VPNs, não sobrescreve o arquivo e
 		// espera ele ser corrigido (o observador recarrega).
@@ -293,6 +309,9 @@ func serve(ctx context.Context, p Platform, l layout, clock shared.Clock, ready 
 			if err == nil {
 				return
 			}
+			if errors.Is(err, fs.ErrNotExist) {
+				break // apagado: avisa na hora; recriado, o observador recarrega
+			}
 			log.Warn("lendo config.json; nova tentativa", "erro", err, "espera", d)
 			if !sleepCtx(wctx, clock, d) {
 				return
@@ -348,12 +367,9 @@ func serve(ctx context.Context, p Platform, l layout, clock shared.Clock, ready 
 	srv := &ipc.Server{Backend: o, AppVersion: version, Log: log}
 	sctx, scancel := context.WithCancel(context.Background())
 	defer scancel()
-	srvDone := make(chan struct{})
+	srvErr := make(chan error, 1)
 	serving = true
-	go func() {
-		defer close(srvDone)
-		serveIPC(sctx, srv, ln, p, clock, log)
-	}()
+	go func() { srvErr <- srv.Serve(sctx, ln) }()
 
 	log.Info("serviço iniciado", "versao", version, "vpns", len(cfg.VPNs))
 	p.Events.Info(fmt.Sprintf("VPN Monitor %s iniciado", version))
@@ -361,57 +377,37 @@ func serve(ctx context.Context, p Platform, l layout, clock shared.Clock, ready 
 		ready(o)
 	}
 
-	<-ctx.Done()
-	log.Info("parando o serviço")
-	wcancel()
-	o.Stop() // supervisores em paralelo com prazo de 7 s; grava state.json
-	ocancel()
-	wg.Wait()
-	scancel()
+	// Serve só volta sozinho se o listener morreu (falhas transitórias de
+	// Accept ele mesmo repete). Recriar o pipe deixaria o nome livre para
+	// outro processo criá-lo antes (squatting); então o serviço para de forma
+	// ordenada e devolve erro: o svc.Loop sai ≠ 0 e a recuperação do SCM o
+	// reinicia com o pipe novo.
+	var fatal error
 	select {
-	case <-srvDone:
-	case <-time.After(serverStopWait):
-		log.Warn("servidor do pipe não terminou no prazo; seguindo com a parada")
+	case <-ctx.Done():
+		log.Info("parando o serviço")
+	case err := <-srvErr:
+		fatal = fmt.Errorf("o pipe %s deixou de funcionar; parando para o SCM reiniciar o serviço: %v", ipc.PipeName, err)
+		log.Error(fatal.Error())
+		p.Events.Error(fatal.Error())
+	}
+	wcancel()
+	o.Stop() // supervisores em paralelo com prazo de 7 s; grava state.json; VPNs ficam de pé
+	ocancel()
+	if !waitTimeout(&wg, watchersStopWait) {
+		log.Warn("observadores não terminaram no prazo; seguindo com a parada")
+	}
+	if fatal == nil {
+		scancel()
+		select {
+		case <-srvErr:
+		case <-time.After(serverStopWait):
+			log.Warn("servidor do pipe não terminou no prazo; seguindo com a parada")
+		}
 	}
 	log.Info("serviço parado")
 	p.Events.Info("VPN Monitor parado")
-	return nil
-}
-
-// serveIPC atende o pipe até ctx terminar. ipc.Server.Serve volta em
-// qualquer falha de Accept (e fecha o listener); aqui o pipe é recriado com
-// espera crescente, sem derrubar o serviço. Uma falha por sequência vai ao
-// Event Log; a sequência termina quando o pipe serve por listenHealthy.
-func serveIPC(ctx context.Context, srv *ipc.Server, ln net.Listener, p Platform, clock shared.Clock, log *slog.Logger) {
-	delay := listenRetryMin
-	warned := false
-	for {
-		started := clock.Now()
-		err := srv.Serve(ctx, ln)
-		if ctx.Err() != nil {
-			return
-		}
-		if clock.Now().Sub(started) >= listenHealthy {
-			delay, warned = listenRetryMin, false
-		}
-		msg := fmt.Sprintf("o pipe %s parou de aceitar conexões; recriando: %v", ipc.PipeName, err)
-		log.Error(msg)
-		if !warned {
-			p.Events.Warning(msg)
-			warned = true
-		}
-		for {
-			if !sleepCtx(ctx, clock, delay) {
-				return
-			}
-			delay = min(delay*2, listenRetryMax)
-			if ln, err = p.Listen(); err == nil {
-				log.Info("pipe recriado")
-				break
-			}
-			log.Error("recriando o pipe", "erro", err)
-		}
-	}
+	return fatal
 }
 
 // serviceMain é o caminho quando o SCM inicia o processo. O código de saída

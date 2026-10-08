@@ -269,8 +269,12 @@ func (o *Orchestrator) ReloadFromDisk() error {
 // ConfigUnreadable avisa que config.json não pôde ser lido mesmo após as
 // novas tentativas da montagem: registra no log e no Event Log e publica
 // configStatus com o motivo. A config em uso continua valendo.
+// Arquivo apagado tem aviso próprio (recriado, o observador recarrega).
 func (o *Orchestrator) ConfigUnreadable(err error) {
 	msg := "não foi possível ler config.json; mantendo a config anterior: " + err.Error()
+	if errors.Is(err, fs.ErrNotExist) {
+		msg = "config.json removido; mantendo a configuração em uso"
+	}
 	o.opts.Log.Error(msg)
 	o.opts.Events.Warning(msg)
 	o.bus.publish(ipc.MustMessage("", ipc.TypeConfigStatus, ipc.ConfigStatus{OK: false, Message: msg}))

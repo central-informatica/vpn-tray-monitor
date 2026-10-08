@@ -6,9 +6,8 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
-	"sync"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -336,67 +335,109 @@ func TestServeACLFailureAborts(t *testing.T) {
 	}
 }
 
-// flakyListener falha no primeiro Accept com um erro que não é de parada.
-type flakyListener struct {
-	net.Listener
-	failed atomic.Bool
-}
-
-func (f *flakyListener) Accept() (net.Conn, error) {
-	if f.failed.CompareAndSwap(false, true) {
-		return nil, errors.New("falha transitória do pipe")
-	}
-	return f.Listener.Accept()
-}
-
-func TestServeRecreatesListenerAfterAcceptFailure(t *testing.T) {
+// Listener morto (fechado sem parada pedida): o serviço para de forma
+// ordenada e devolve erro, para o SCM reiniciá-lo. Recriar o pipe deixaria o
+// nome livre para outro processo (squatting).
+func TestServeStopsWithErrorWhenPipeDies(t *testing.T) {
 	te := newTestEnv(t)
+	te.writeConfig(t, "Matriz")
+	r := fake.NewRAS("VPN Matriz")
 	events := &logging.RecordingSink{}
-	p := testPlatform(fake.NewRAS("VPN Matriz"), events, &fake.ACL{})
-	var (
-		mu    sync.Mutex
-		addrs []string
-	)
-	p.Listen = func() (net.Listener, error) {
-		ln, err := net.Listen("tcp", "127.0.0.1:0")
-		if err != nil {
-			return nil, err
-		}
-		mu.Lock()
-		defer mu.Unlock()
-		addrs = append(addrs, ln.Addr().String())
-		if len(addrs) == 1 {
-			return &flakyListener{Listener: ln}, nil
-		}
-		return ln, nil
+	p := testPlatform(r, events, &fake.ACL{})
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
 	}
-	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan error, 1)
-	go func() { done <- serve(ctx, p, newLayout(te.dir), shared.RealClock{}, nil) }()
-	t.Cleanup(func() { cancel(); <-done })
+	listens := 0
+	p.Listen = func() (net.Listener, error) { listens++; return ln, nil }
 	te.dial = func(context.Context) (*ipc.Client, error) {
-		mu.Lock()
-		if len(addrs) < 2 {
-			mu.Unlock()
-			return nil, errors.New("ainda não recriado")
-		}
-		a := addrs[len(addrs)-1]
-		mu.Unlock()
-		c, err := net.Dial("tcp", a)
+		c, err := net.Dial("tcp", ln.Addr().String())
 		if err != nil {
 			return nil, err
 		}
 		return ipc.Handshake(c, "teste")
 	}
-	waitFor(t, func() bool { return stateVia(te) != "" })
-	if !hasEvent(events.Snapshot(), "warning", "pipe") {
+	done := make(chan error, 1)
+	go func() { done <- serve(context.Background(), p, newLayout(te.dir), shared.RealClock{}, nil) }()
+	waitFor(t, func() bool { return stateVia(te) == "Conectada" })
+	ln.Close()
+	select {
+	case err := <-done:
+		if err == nil || !strings.Contains(err.Error(), "pipe") {
+			t.Fatalf("pipe morto deve encerrar com erro: %v", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("serve não parou com o pipe morto")
+	}
+	if listens != 1 {
+		t.Fatalf("o pipe não pode ser recriado: %d", listens)
+	}
+	if _, err := os.Stat(filepath.Join(te.dir, "state.json")); err != nil {
+		t.Fatal("state.json deveria ser gravado")
+	}
+	if !r.IsActive("VPN Matriz") || slices.Contains(r.Calls(), "HangUp VPN Matriz") {
+		t.Fatalf("parada não pode derrubar VPN: %v", r.Calls())
+	}
+	if !hasEvent(events.Snapshot(), "error", "pipe") {
 		t.Fatalf("Event Log: %+v", events.Snapshot())
 	}
-	cancel()
-	if err := <-done; err != nil {
-		t.Fatalf("o serviço não pode cair por falha do pipe: %v", err)
+}
+
+// Parada pedida enquanto a partida ainda repete a leitura do config.json:
+// sai limpo, sem o falso "config.json inválido" e sem subir o orquestrador.
+func TestServeCancelledDuringStartupConfigRead(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root lê arquivo sem permissão")
 	}
-	done <- nil
+	te := newTestEnv(t)
+	te.writeConfig(t, "Matriz")
+	path := filepath.Join(te.dir, "config.json")
+	_ = os.Chmod(path, 0)
+	t.Cleanup(func() { _ = os.Chmod(path, 0o600) })
+	r := fake.NewRAS("VPN Matriz")
+	events := &logging.RecordingSink{}
+	p := testPlatform(r, events, &fake.ACL{})
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	p.Listen = func() (net.Listener, error) { return ln, nil }
+	ctx, cancel := context.WithCancel(context.Background())
+	time.AfterFunc(300*time.Millisecond, cancel)
+	readyCalled := false
+	start := time.Now()
+	err = serve(ctx, p, newLayout(te.dir), shared.RealClock{}, func(*service.Orchestrator) { readyCalled = true })
+	if err != nil || readyCalled || time.Since(start) > 2*time.Second {
+		t.Fatalf("err=%v ready=%v em %s", err, readyCalled, time.Since(start))
+	}
+	if len(r.Calls()) != 0 {
+		t.Fatalf("não pode discar: %v", r.Calls())
+	}
+	for _, e := range events.Snapshot() {
+		if e.Level == "error" {
+			t.Fatalf("falso erro no Event Log: %+v", e)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(te.dir, "state.json")); err == nil {
+		t.Fatal("sem orquestrador, state.json não é gravado")
+	}
+}
+
+// config.json apagado: aviso específico na hora, sem as novas tentativas.
+func TestServeConfigRemovedWarnsImmediately(t *testing.T) {
+	te := newTestEnv(t)
+	te.writeConfig(t, "Matriz")
+	ts := startService(t, te)
+	time.Sleep(500 * time.Millisecond) // linha de base do observador
+	_ = os.Remove(filepath.Join(te.dir, "config.json"))
+	waitFor(t, func() bool { return hasEvent(ts.events.Snapshot(), "warning", "config.json removido") })
+	b, _ := os.ReadFile(filepath.Join(te.dir, "logs", "vpnmon.log"))
+	if strings.Contains(string(b), "nova tentativa") {
+		t.Fatalf("arquivo removido não deve ser repetido: %s", b)
+	}
+	if n := len(ts.o.Status().VPNs); n != 1 {
+		t.Fatalf("configuração em uso deve ser mantida: %d", n)
+	}
 }
 
 func TestServeRetriesUnreadableConfig(t *testing.T) {

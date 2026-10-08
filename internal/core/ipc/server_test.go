@@ -347,3 +347,92 @@ func TestFitLogTail(t *testing.T) {
 		t.Fatal("texto pequeno passa inteiro")
 	}
 }
+
+// glitchListener devolve erros transitórios no Accept quando armado, sem
+// fechar o listener de verdade (no go-winio o firstHandle segue vivo).
+type glitchListener struct {
+	net.Listener
+	mu      sync.Mutex
+	glitch  int
+	glitchN int
+}
+
+func (g *glitchListener) arm(n int) { g.mu.Lock(); g.glitch = n; g.mu.Unlock() }
+
+func (g *glitchListener) Accept() (net.Conn, error) {
+	g.mu.Lock()
+	if g.glitch > 0 {
+		g.glitch--
+		g.glitchN++
+		g.mu.Unlock()
+		return nil, errors.New("falha transitória do Accept")
+	}
+	g.mu.Unlock()
+	return g.Listener.Accept()
+}
+
+// Erro de Accept que não é fechamento nem parada: Serve espera e repete,
+// sem fechar o listener (o nome do pipe ficaria livre para outro processo)
+// e sem derrubar as conexões existentes.
+func TestServerRetriesTransientAcceptErrors(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	g := &glitchListener{Listener: ln}
+	s := &Server{Backend: &fakeBackend{}, AppVersion: "2.0.0-teste", HandshakeTimeout: time.Second, WriteTimeout: time.Second}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- s.Serve(ctx, g) }()
+	t.Cleanup(func() { cancel(); <-done })
+
+	existing := dial(t, ln.Addr().String())
+	if err := existing.Call(TypeStatus, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	g.arm(5)
+	// O Accept pendente já pegou o listener real; a próxima conexão o libera
+	// e as seguintes passam pelas falhas.
+	first := dial(t, ln.Addr().String())
+	if err := first.Call(TypeStatus, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	after := dial(t, ln.Addr().String())
+	if err := after.Call(TypeStatus, nil, nil); err != nil {
+		t.Fatalf("Serve deveria seguir atendendo após falhas transitórias: %v", err)
+	}
+	g.mu.Lock()
+	n := g.glitchN
+	g.mu.Unlock()
+	if n != 5 {
+		t.Fatalf("falhas consumidas: %d", n)
+	}
+	select {
+	case err := <-done:
+		t.Fatalf("Serve voltou com %v", err)
+	default:
+	}
+	if err := existing.Call(TypeStatus, nil, nil); err != nil {
+		t.Fatalf("conexão existente foi derrubada: %v", err)
+	}
+}
+
+// Listener fechado de fato: Serve volta com erro (a montagem decide).
+func TestServerReturnsWhenListenerCloses(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := &Server{Backend: &fakeBackend{}, AppVersion: "2.0.0-teste"}
+	done := make(chan error, 1)
+	go func() { done <- s.Serve(context.Background(), ln) }()
+	ln.Close()
+	select {
+	case err := <-done:
+		if !errors.Is(err, net.ErrClosed) {
+			t.Fatalf("erro: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Serve não voltou com o listener fechado")
+	}
+}

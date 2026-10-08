@@ -72,8 +72,16 @@ func (s *Server) defaults() {
 	}
 }
 
+// Espera entre tentativas de Accept após falha transitória (dobra até o teto).
+const (
+	acceptRetryMin = 5 * time.Millisecond
+	acceptRetryMax = time.Second
+)
+
 // Serve aceita conexões até ctx terminar; então fecha o listener e todas
-// as conexões e espera os atendimentos voltarem.
+// as conexões e espera os atendimentos voltarem. Falhas transitórias de
+// Accept são repetidas com espera crescente, sem fechar o listener. Volta com
+// erro só se o listener for fechado sem parada pedida (net.ErrClosed).
 func (s *Server) Serve(ctx context.Context, ln net.Listener) error {
 	s.defaults()
 	var (
@@ -98,16 +106,32 @@ func (s *Server) Serve(ctx context.Context, ln net.Listener) error {
 		case <-stop:
 		}
 	}()
+	var delay time.Duration
 	for {
 		c, err := ln.Accept()
 		if err != nil {
-			closeAll() // vale também para Accept que falhou sem parada pedida
+			if ctx.Err() == nil && !errors.Is(err, net.ErrClosed) {
+				// Falha transitória (no go-winio, ConnectNamedPipe/CreateNamedPipe
+				// de uma instância): o listener e a primeira instância seguem
+				// vivos. Fechar aqui liberaria o nome do pipe para outro processo
+				// criá-lo (squatting); então espera e repete, sem derrubar as
+				// conexões existentes.
+				delay = min(max(2*delay, acceptRetryMin), acceptRetryMax)
+				s.Log.Warn("falha ao aceitar conexão no pipe; nova tentativa", "erro", err, "espera", delay)
+				select {
+				case <-ctx.Done():
+				case <-time.After(delay):
+				}
+				continue
+			}
+			closeAll()
 			wg.Wait()
 			if ctx.Err() != nil {
 				return nil
 			}
-			return err
+			return err // listener fechado de fato (go-winio: ErrPipeListenerClosed == net.ErrClosed)
 		}
+		delay = 0
 		mu.Lock()
 		// Conferido sob o mutex: uma conexão aceita junto com a parada não
 		// escapa do fechamento em massa.
