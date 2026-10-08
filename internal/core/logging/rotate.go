@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+
+	"github.com/guibsu/vpn-tray-monitor/internal/shared"
 )
 
 // RotatingWriter grava em path e, ao passar de MaxBytes, renomeia
@@ -26,7 +28,7 @@ type RotatingWriter struct {
 
 // OpenRotating abre (ou cria) o log em modo append.
 func OpenRotating(path string, maxBytes int64, maxFiles int) (*RotatingWriter, error) {
-	w := &RotatingWriter{path: path, maxBytes: maxBytes, maxFiles: maxFiles, rename: os.Rename, remove: os.Remove}
+	w := &RotatingWriter{path: path, maxBytes: maxBytes, maxFiles: maxFiles, rename: shared.RenameReplace, remove: os.Remove}
 	if err := w.open(); err != nil {
 		return nil, err
 	}

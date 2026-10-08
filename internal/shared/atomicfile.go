@@ -36,7 +36,7 @@ type fileOps struct {
 var osOps = fileOps{
 	createTemp: func(dir, pattern string) (tempFile, error) { return os.CreateTemp(dir, pattern) },
 	chmod:      os.Chmod,
-	rename:     os.Rename,
+	rename:     RenameReplace,
 	remove:     os.Remove,
 	sleep:      time.Sleep,
 	transient:  isTransientRenameErr,
