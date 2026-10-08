@@ -5,7 +5,14 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"time"
 )
+
+// Tentativas do rename e as esperas entre elas. Só erros transitórios
+// (ver isTransientRenameErr) são repetidos; os demais falham na hora.
+const renameAttempts = 5
+
+var renameDelays = []time.Duration{20 * time.Millisecond, 40 * time.Millisecond, 60 * time.Millisecond, 80 * time.Millisecond}
 
 // tempFile é o que WriteFile precisa de um arquivo temporário.
 type tempFile interface {
@@ -15,12 +22,15 @@ type tempFile interface {
 	Name() string
 }
 
-// fileOps isola as chamadas de sistema para os testes simularem falhas.
+// fileOps isola as chamadas de sistema e a espera para os testes simularem
+// falhas sem dormir de verdade.
 type fileOps struct {
 	createTemp func(dir, pattern string) (tempFile, error)
 	chmod      func(name string, mode os.FileMode) error
 	rename     func(from, to string) error
 	remove     func(name string) error
+	sleep      func(d time.Duration)
+	transient  func(err error) bool
 }
 
 var osOps = fileOps{
@@ -28,6 +38,8 @@ var osOps = fileOps{
 	chmod:      os.Chmod,
 	rename:     os.Rename,
 	remove:     os.Remove,
+	sleep:      time.Sleep,
+	transient:  isTransientRenameErr,
 }
 
 // WriteFile grava data em path de forma atômica: escreve num temporário na
@@ -63,8 +75,24 @@ func writeFile(ops fileOps, path string, data []byte, perm os.FileMode) (err err
 	if err = ops.chmod(tmp, perm); err != nil {
 		return fmt.Errorf("permissões de %s: %w", tmp, err)
 	}
-	if err = ops.rename(tmp, path); err != nil {
+	if err = renameWithRetry(ops, tmp, path); err != nil {
 		return fmt.Errorf("renomeando %s → %s: %w", tmp, path, err)
 	}
 	return nil
+}
+
+// renameWithRetry troca o temporário pelo destino. No Windows a substituição
+// falha de forma transitória quando outro processo mantém o destino aberto
+// (leitor, antivírus); por isso repete com espera crescente, até renameAttempts.
+func renameWithRetry(ops fileOps, from, to string) error {
+	var err error
+	for i := 0; i < renameAttempts; i++ {
+		if i > 0 {
+			ops.sleep(renameDelays[i-1])
+		}
+		if err = ops.rename(from, to); err == nil || !ops.transient(err) {
+			return err
+		}
+	}
+	return err
 }
