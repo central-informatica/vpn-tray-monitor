@@ -66,6 +66,20 @@ func FromSeed(s Seed) (Config, error) {
 	return c, nil
 }
 
+// seedField decide o que fazer com a leitura de um valor do seed: ausente
+// vira vazio; qualquer outro erro (ex.: tipo errado, REG_DWORD) é propagado
+// com o nome do valor, para não gerar config padrão silenciosamente.
+func seedField(name, val string, err error, missing bool) (string, error) {
+	switch {
+	case err == nil:
+		return val, nil
+	case missing:
+		return "", nil
+	default:
+		return "", fmt.Errorf("lendo valor %s do seed: %w", name, err)
+	}
+}
+
 // Bootstrap conta de onde veio a config carregada por LoadOrCreate.
 type Bootstrap struct {
 	Created     bool  // o arquivo não existia e foi gravado agora

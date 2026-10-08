@@ -21,19 +21,25 @@ func ReadSeedRegistry() (Seed, bool, error) {
 		return Seed{}, false, err
 	}
 	defer k.Close()
-	get := func(name string) string {
-		v, _, err := k.GetStringValue(name)
-		if err != nil {
-			return ""
-		}
-		return v
+	var seed Seed
+	fields := []struct {
+		name string
+		dst  *string
+	}{
+		{"VPN_ENTRY", &seed.VPNEntry},
+		{"VPN_NAME", &seed.VPNName},
+		{"CHECK_KIND", &seed.CheckKind},
+		{"CHECK_HOST", &seed.CheckHost},
+		{"CHECK_PORT", &seed.CheckPort},
+		{"INTERVAL", &seed.Interval},
 	}
-	return Seed{
-		VPNEntry:  get("VPN_ENTRY"),
-		VPNName:   get("VPN_NAME"),
-		CheckKind: get("CHECK_KIND"),
-		CheckHost: get("CHECK_HOST"),
-		CheckPort: get("CHECK_PORT"),
-		Interval:  get("INTERVAL"),
-	}, true, nil
+	for _, f := range fields {
+		v, _, gerr := k.GetStringValue(f.name)
+		val, ferr := seedField(f.name, v, gerr, errors.Is(gerr, registry.ErrNotExist))
+		if ferr != nil {
+			return Seed{}, false, ferr
+		}
+		*f.dst = val
+	}
+	return seed, true, nil
 }

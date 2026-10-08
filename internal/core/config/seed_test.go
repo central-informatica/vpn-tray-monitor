@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -70,7 +71,31 @@ func TestLoadOrCreate(t *testing.T) {
 	if _, _, err := LoadOrCreate(p3, seed); err == nil {
 		t.Fatal("arquivo existente inválido deve dar erro (não sobrescrever)")
 	}
+}
 
+func TestLoadOrCreateSeedReaderError(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "config.json")
+	c, b, err := LoadOrCreate(p, func() (Seed, bool, error) { return Seed{}, false, errors.New("boom") })
+	if err != nil || b.SeedProblem == nil || len(c.VPNs) != 0 || !b.Created || b.FromSeed {
+		t.Fatalf("erro do leitor: %+v %+v %v", c, b, err)
+	}
+	if _, err := os.Stat(p); err != nil {
+		t.Fatal("config vazia deveria ter sido gravada")
+	}
+}
+
+func TestSeedField(t *testing.T) {
+	cause := errors.New("tipo errado")
+	if v, err := seedField("INTERVAL", "20", nil, false); v != "20" || err != nil {
+		t.Fatalf("ok: %q %v", v, err)
+	}
+	if v, err := seedField("INTERVAL", "", cause, true); v != "" || err != nil {
+		t.Fatalf("ausente deve virar vazio: %q %v", v, err)
+	}
+	_, err := seedField("INTERVAL", "", cause, false)
+	if !errors.Is(err, cause) || !strings.Contains(err.Error(), "INTERVAL") {
+		t.Fatalf("erro deve propagar com o nome: %v", err)
+	}
 }
 
 func TestStateCorruptIsQuarantined(t *testing.T) {
