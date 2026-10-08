@@ -18,6 +18,7 @@ import (
 	"github.com/guibsu/vpn-tray-monitor/internal/core/platform/acl"
 	"github.com/guibsu/vpn-tray-monitor/internal/core/platform/dpapi"
 	"github.com/guibsu/vpn-tray-monitor/internal/core/platform/svc"
+	"github.com/guibsu/vpn-tray-monitor/internal/core/platform/token"
 	"github.com/guibsu/vpn-tray-monitor/internal/features/credentials"
 	"github.com/guibsu/vpn-tray-monitor/internal/shared"
 )
@@ -63,12 +64,17 @@ type env struct {
 	// interrupt deriva o contexto que o Ctrl+C cancela (`run`); injetável
 	// porque no Windows o processo não consegue mandar os.Interrupt a si mesmo.
 	interrupt func(context.Context) (context.Context, context.CancelFunc)
+	// adminOwner faz o processo elevado criar objetos com dono Administradores
+	// (token.SetDefaultOwnerAdmins). Sem isso, o que a CLI grava na pasta de
+	// dados nasceria com dono = conta do usuário e a pasta inteira iria para a
+	// quarentena na partida seguinte do serviço.
+	adminOwner func() error
 }
 
 func defaultEnv() env {
 	return env{
 		stdin: os.Stdin, stdout: os.Stdout, stderr: os.Stderr,
-		dataDir: dataDir, elevated: svc.IsElevated, dpapi: dpapi.New(), readPassword: readPassword,
+		dataDir: dataDir, elevated: svc.IsElevated, adminOwner: token.SetDefaultOwnerAdmins, dpapi: dpapi.New(), readPassword: readPassword,
 		securer:      acl.NewWithLog(func(f string, a ...any) { fmt.Fprintf(os.Stderr, "aviso: "+f+"\n", a...) }),
 		stdinConsole: stdinIsConsole,
 		dial: func(ctx context.Context) (*ipc.Client, error) {
@@ -146,6 +152,14 @@ func dispatch(args []string, e env) error {
 	}
 	if !e.elevated() {
 		return errors.New("este comando exige um prompt de administrador")
+	}
+	// Antes de qualquer gravação (cofre, config, log e state do `run`): o que
+	// este processo criar precisa ter dono Administradores. O serviço (sem
+	// argumentos, via SCM) não passa por aqui de propósito: como LocalSystem,
+	// o dono padrão já é Administradores/SYSTEM, e um passo a mais na partida
+	// do serviço só acrescentaria um jeito de ele não subir.
+	if err := e.adminOwner(); err != nil {
+		return fmt.Errorf("nada foi gravado: não foi possível fazer o processo criar arquivos com dono Administradores: %w", err)
 	}
 	return run(rest, e)
 }

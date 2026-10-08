@@ -69,11 +69,13 @@ func Decide(root Entry, children []Entry) Decision {
 	if Matches(root.SDDL) {
 		return Decision{ActionOK, ""}
 	}
-	owner, _ := section(root.SDDL, "O:")
-	if len(children) == 0 && OwnerTrusted(owner) {
-		return Decision{ActionReapplyRoot, "dono ou DACL da raiz divergem"}
+	if owner, _ := section(root.SDDL, "O:"); !OwnerTrusted(owner) {
+		return Decision{ActionQuarantine, "dono da raiz não confiável"}
 	}
-	return Decision{ActionQuarantine, "dono ou DACL da raiz divergem e há conteúdo ou dono não confiável"}
+	if len(children) == 0 {
+		return Decision{ActionReapplyRoot, "DACL da raiz diverge"}
+	}
+	return Decision{ActionQuarantine, "DACL da raiz diverge e há conteúdo"}
 }
 
 // childProblem devolve por que um filho não confere ("" se confere): não é

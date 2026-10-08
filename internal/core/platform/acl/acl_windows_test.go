@@ -7,15 +7,39 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"golang.org/x/sys/windows"
+
+	"github.com/guibsu/vpn-tray-monitor/internal/core/platform/token"
 )
 
+// needAdmin exige processo elevado e faz o processo criar objetos com dono
+// Administradores, como a CLI elevada faz em produção: com a política padrão
+// do Windows ("Criador do objeto"), o que um administrador elevado cria tem
+// dono = a conta do usuário, que a regra não aceita. Efeito no processo de
+// teste inteiro, idempotente.
 func needAdmin(t *testing.T) {
 	t.Helper()
 	if !windows.GetCurrentProcessToken().IsElevated() {
 		t.Skip("exige processo elevado (o runner do CI é)")
+	}
+	if err := token.SetDefaultOwnerAdmins(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// setOwnerToUser troca o dono de p para a conta do usuário do processo (o
+// que a política "Criador do objeto" faria sem o ajuste do token).
+func setOwnerToUser(t *testing.T, p string) {
+	t.Helper()
+	u, err := windows.GetCurrentProcessToken().GetTokenUser()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := windows.SetNamedSecurityInfo(p, windows.SE_FILE_OBJECT, windows.OWNER_SECURITY_INFORMATION, u.User.Sid, nil, nil, nil); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -51,11 +75,16 @@ func setDACL(t *testing.T, p, sddl string, protected bool) {
 	}
 }
 
-// quarantined confere que a raiz foi posta de lado uma vez e recriada certa.
-func quarantined(t *testing.T, dir string, changed bool, err error) string {
+// quarantined confere que a raiz foi posta de lado uma vez, pelo motivo
+// esperado (para o teste não passar por outro desvio, como o dono), e
+// recriada certa.
+func quarantined(t *testing.T, dir, reason string, changed bool, err error) string {
 	t.Helper()
 	if !errors.Is(err, ErrQuarantined) || !changed {
 		t.Fatalf("esperava ErrQuarantined com changed: %v %v", changed, err)
+	}
+	if !strings.HasSuffix(err.Error(), "("+reason+")") {
+		t.Fatalf("motivo errado: quer %q em %v", reason, err)
 	}
 	if got := secOf(t, dir); !Matches(got) {
 		t.Fatalf("raiz recriada com segurança errada: %v", got)
@@ -67,7 +96,8 @@ func quarantined(t *testing.T, dir string, changed bool, err error) string {
 	return m[0]
 }
 
-// Árvore boa criada pelo próprio EnsureDir, com arquivos dentro: no-op depois.
+// Árvore boa criada pelo próprio EnsureDir, com arquivos dentro (criados com
+// dono Administradores, como a CLI elevada faz): no-op depois.
 func TestWindowsEnsureDirGoodTree(t *testing.T) {
 	needAdmin(t)
 	dir := filepath.Join(t.TempDir(), "pai", "VPNMonitor")
@@ -89,7 +119,8 @@ func TestWindowsEnsureDirGoodTree(t *testing.T) {
 	}
 }
 
-// Raiz vazia pré-criada com a DACL herdada: o descritor é reaplicado.
+// Raiz vazia pré-criada com dono Administradores e a DACL herdada: o
+// descritor é reaplicado.
 func TestWindowsEnsureDirReappliesEmptyRoot(t *testing.T) {
 	needAdmin(t)
 	dir := filepath.Join(t.TempDir(), "VPNMonitor")
@@ -121,7 +152,7 @@ func TestWindowsEnsureDirBadChild(t *testing.T) {
 	before := secOf(t, child)
 
 	changed, err := New().EnsureDir(dir)
-	side := quarantined(t, dir, changed, err)
+	side := quarantined(t, dir, "config.json: DACL protegida", changed, err)
 	moved := filepath.Join(side, "config.json")
 	if b, err := os.ReadFile(moved); err != nil || string(b) != "{}" {
 		t.Fatalf("conteúdo antigo deveria estar intocado: %q %v", b, err)
@@ -157,7 +188,7 @@ func TestWindowsEnsureDirChildJunction(t *testing.T) {
 	junction(t, filepath.Join(dir, "logs", "junc"), target)
 
 	changed, err := New().EnsureDir(dir)
-	quarantined(t, dir, changed, err)
+	quarantined(t, dir, filepath.Join("logs", "junc")+": ponto de reparse", changed, err)
 	if _, err := os.Stat(keep); err != nil {
 		t.Fatalf("alvo da junção foi tocado: %v", err)
 	}
@@ -179,7 +210,7 @@ func TestWindowsEnsureDirRootJunction(t *testing.T) {
 	junction(t, dir, target)
 
 	changed, err := New().EnsureDir(dir)
-	quarantined(t, dir, changed, err)
+	quarantined(t, dir, "raiz é ponto de reparse", changed, err)
 	if got := secOf(t, target); got != before {
 		t.Fatalf("alvo da junção foi alterado: %v != %v", got, before)
 	}
@@ -198,7 +229,7 @@ func TestWindowsEnsureDirRootDeniesSystem(t *testing.T) {
 	setDACL(t, dir, "D:P(D;OICI;FA;;;SY)(A;OICI;FA;;;BA)", true)
 
 	changed, err := New().EnsureDir(dir)
-	quarantined(t, dir, changed, err)
+	quarantined(t, dir, "DACL da raiz diverge e há conteúdo", changed, err)
 }
 
 // Raiz com DACL que nega tudo a Todos e contém um arquivo: o rename de
@@ -215,11 +246,50 @@ func TestWindowsEnsureDirRootDeniesEveryone(t *testing.T) {
 	setDACL(t, dir, "D:P(D;OICI;FA;;;WD)", true)
 
 	changed, err := New().EnsureDir(dir)
-	side := quarantined(t, dir, changed, err)
+	// Administradores pode ler o descritor (dono) mas não listar a raiz.
+	side := quarantined(t, dir, ".: ilegível", changed, err)
 	// Devolve acesso ao diretório de lado para ler o conteúdo e permitir a limpeza.
 	t.Cleanup(func() { setDACL(t, side, "D:P(A;OICI;FA;;;BA)", true) })
 	setDACL(t, side, "D:P(A;OICI;FA;;;BA)", true)
 	if b, err := os.ReadFile(filepath.Join(side, "antigo.txt")); err != nil || string(b) != "antigo" {
 		t.Fatalf("conteúdo antigo deveria estar preservado: %q %v", b, err)
 	}
+}
+
+// Filho com dono = conta do usuário (o que um editor que salva por arquivo
+// temporário + rename produz): a raiz inteira vai para o lado.
+func TestWindowsEnsureDirChildOwnedByUser(t *testing.T) {
+	needAdmin(t)
+	dir := filepath.Join(t.TempDir(), "VPNMonitor")
+	if _, err := New().EnsureDir(dir); err != nil {
+		t.Fatal(err)
+	}
+	child := filepath.Join(dir, "config.json")
+	if err := os.WriteFile(child, []byte("{}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if changed, err := New().EnsureDir(dir); err != nil || changed {
+		t.Fatalf("com dono Administradores confere: %v %v", changed, err)
+	}
+	setOwnerToUser(t, child)
+
+	changed, err := New().EnsureDir(dir)
+	side := quarantined(t, dir, "config.json: dono não confiável", changed, err)
+	if b, err := os.ReadFile(filepath.Join(side, "config.json")); err != nil || string(b) != "{}" {
+		t.Fatalf("conteúdo antigo deveria estar preservado: %q %v", b, err)
+	}
+}
+
+// Raiz vazia com dono = conta do usuário: não é confiável (o dono mantém
+// WRITE_DAC), então vai para o lado em vez de ter o descritor reaplicado.
+func TestWindowsEnsureDirEmptyRootOwnedByUser(t *testing.T) {
+	needAdmin(t)
+	dir := filepath.Join(t.TempDir(), "VPNMonitor")
+	if err := os.Mkdir(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	setOwnerToUser(t, dir)
+
+	changed, err := New().EnsureDir(dir)
+	quarantined(t, dir, "dono da raiz não confiável", changed, err)
 }

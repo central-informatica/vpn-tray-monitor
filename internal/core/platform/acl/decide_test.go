@@ -45,3 +45,23 @@ func TestDecide(t *testing.T) {
 		}
 	}
 }
+
+// O motivo distingue dono e DACL da raiz (os testes Windows conferem o motivo).
+func TestDecideRootReasons(t *testing.T) {
+	user := Entry{Path: ".", Exists: true, IsDir: true, SDDL: "O:S-1-5-21-1-2-3-1001D:AI(A;ID;FA;;;SY)"}
+	if d := Decide(user, nil); d.Action != ActionQuarantine || d.Reason != "dono da raiz não confiável" {
+		t.Fatalf("dono usuário: %v %q", d.Action, d.Reason)
+	}
+	noOwner := Entry{Path: ".", Exists: true, IsDir: true, SDDL: "D:P(A;OICI;FA;;;SY)"}
+	if d := Decide(noOwner, nil); d.Action != ActionQuarantine || d.Reason != "dono da raiz não confiável" {
+		t.Fatalf("sem dono: %v %q", d.Action, d.Reason)
+	}
+	dacl := Entry{Path: ".", Exists: true, IsDir: true, SDDL: "O:BAD:AI(A;OICI;FA;;;SY)"}
+	if d := Decide(dacl, nil); d.Action != ActionReapplyRoot || d.Reason != "DACL da raiz diverge" {
+		t.Fatalf("DACL, vazia: %v %q", d.Action, d.Reason)
+	}
+	child := Entry{Path: "a", Exists: true, SDDL: "O:BAD:AI(A;ID;FA;;;SY)"}
+	if d := Decide(dacl, []Entry{child}); d.Action != ActionQuarantine || d.Reason != "DACL da raiz diverge e há conteúdo" {
+		t.Fatalf("DACL, com conteúdo: %v %q", d.Action, d.Reason)
+	}
+}

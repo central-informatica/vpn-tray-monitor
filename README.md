@@ -33,3 +33,16 @@ vpnmon-svc status
 A entrada RAS precisa existir para todos os usuários
 (`Add-VpnConnection -AllUserConnection`): o serviço roda como LocalSystem e só
 enxerga esse catálogo.
+
+## Edição manual do config.json
+
+Prefira a CLI (`vpnmon-svc vpn add|remove`). Para editar à mão
+`%ProgramData%\VPNMonitor\config.json`, use um editor que salva no próprio
+arquivo (o Bloco de Notas faz isso), aberto como administrador. Editores que
+salvam por arquivo temporário + renomeação (VS Code e outros) criam um arquivo
+novo com dono = a sua conta: a pasta de dados deixa de conferir (§5.1) e, na
+próxima partida do serviço, vai inteira para o lado
+(`VPNMonitor.naoconfiavel-*`, dados preservados) e o serviço sobe vazio.
+
+A CLI elevada não tem esse problema: ela faz o próprio processo criar arquivos
+com dono Administradores antes de gravar.

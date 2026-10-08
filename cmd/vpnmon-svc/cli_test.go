@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -37,6 +39,7 @@ func newTestEnv(t *testing.T) *testEnv {
 		stdin: strings.NewReader(""), stdout: te.out, stderr: te.errb,
 		dataDir:      func() (string, error) { return dir, nil },
 		elevated:     func() bool { return true },
+		adminOwner:   func() error { return nil },
 		dpapi:        fake.DPAPI{},
 		securer:      &fake.ACL{},
 		stdinConsole: func() bool { return false },
@@ -260,5 +263,62 @@ func TestMinorCLIRules(t *testing.T) {
 	te.readPassword = func(io.Reader) (string, error) { return "", errCancelled }
 	if code := te.run("credential", "set", "Matriz", "--user", "a"); code != 130 || vault.Has("Matriz") {
 		t.Fatalf("cancelado: %d", code)
+	}
+}
+
+// Todo comando elevado define o dono padrão Administradores antes de gravar;
+// se não conseguir, sai com 1 sem tocar na pasta de dados.
+func TestAdminOwnerBeforeWriting(t *testing.T) {
+	te := newTestEnv(t)
+	te.writeConfig(t, "Matriz")
+	vault := credentials.Vault{Dir: filepath.Join(te.dir, "credentials"), DPAPI: fake.DPAPI{}}
+	securer := &fake.ACL{}
+	te.securer = securer
+	var calls []string
+	te.adminOwner = func() error {
+		calls = append(calls, fmt.Sprintf("dono (acl=%d)", len(securer.Dirs)))
+		return errors.New("ERROR_INVALID_OWNER")
+	}
+
+	te.stdin = strings.NewReader("pw\n")
+	if code := te.run("credential", "set", "Matriz", "--user", "a", "--password-stdin"); code != 1 {
+		t.Fatalf("falha no dono: código %d", code)
+	}
+	if !strings.Contains(te.errb.String(), "nada foi gravado") || !strings.Contains(te.errb.String(), "ERROR_INVALID_OWNER") {
+		t.Fatalf("mensagem: %q", te.errb)
+	}
+	if vault.Has("Matriz") || len(securer.Dirs) != 0 {
+		t.Fatalf("não deveria gravar nem endurecer: cofre=%v acl=%v", vault.Has("Matriz"), securer.Dirs)
+	}
+	te.platform = func() (Platform, error) { t.Fatal("run não deveria montar a plataforma"); return Platform{}, nil }
+	if code := te.run("run"); code != 1 {
+		t.Fatalf("run com falha no dono: código %d", code)
+	}
+	if _, err := os.Stat(filepath.Join(te.dir, "logs")); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("run não deveria criar logs: %v", err)
+	}
+
+	// Sucesso: chamado uma vez por comando elevado, antes do endurecimento.
+	calls = nil
+	te.adminOwner = func() error {
+		calls = append(calls, fmt.Sprintf("dono (acl=%d)", len(securer.Dirs)))
+		return nil
+	}
+	te.stdin = strings.NewReader("pw\n")
+	if code := te.run("credential", "set", "Matriz", "--user", "a", "--password-stdin"); code != 0 || !vault.Has("Matriz") {
+		t.Fatalf("set: %d %q", code, te.errb)
+	}
+	if len(calls) != 1 || calls[0] != "dono (acl=0)" || len(securer.Dirs) != 1 {
+		t.Fatalf("ordem: %v acl=%v", calls, securer.Dirs)
+	}
+
+	// Sem elevação, version e uso inválido não mexem no token.
+	calls = nil
+	te.run("version")
+	te.run("formatar")
+	te.elevated = func() bool { return false }
+	te.run("status")
+	if len(calls) != 0 {
+		t.Fatalf("não deveria ajustar o token: %v", calls)
 	}
 }
