@@ -6,7 +6,7 @@ Cada decisão traz o que foi decidido, por quê e o custo se estiver errada.
 ## Pendências antes do merge
 
 - Primeira execução verde dos testes Windows no CI (ACL/rename por handle, pipe/DACL, SCM real, RAS/RasMan, ICMP/netwatch) — os `*_windows_test.go` só foram compilados.
-- ~~Decisão do usuário: PPPoE como única saída de rede (hoje fica em SemRede para sempre).~~ **Decidido (B): PPPoE conta como rede — implementado.** Interface PPP (IfType 23) com rota padrão conta como rede se o alias não for nenhuma entrada RAS da config (nem a sondada), sem diferenciar maiúsculas e após trim; túneis seguem excluídos. Regra pura em `netwatch.DecideNetwork` (testada no Linux), alias lido de `MIB_IF_ROW2.Alias` no Windows, conjunto de entradas em `adapters.Entries` atualizado por `Options.OnConfig` (antes `OnGlobals`) a cada mudança de config. Spec §4.3 item 5 atualizado. Resta validar no Windows real (alias da interface PPP = nome da entrada).
+- ~~Decisão do usuário: PPPoE como única saída de rede (hoje fica em SemRede para sempre).~~ **Decidido (B): PPPoE conta como rede — implementado.** Interface PPP (IfType 23) com rota padrão conta como rede se o alias não for vazio (alias vazio não conta, conservador) e não for nenhuma entrada RAS da config (nem a sondada), sem diferenciar maiúsculas e após trim; túneis seguem excluídos. Regra pura em `netwatch.DecideNetwork` (testada no Linux), alias lido de `MIB_IF_ROW2.Alias` no Windows, conjunto de entradas em `adapters.Entries` atualizado por `Options.OnConfig` (antes `OnGlobals`) a cada mudança de config. Spec §4.3 item 5 atualizado. Resta validar no Windows real que toda conexão RAS aparece como PPP com alias = nome da entrada.
 
 ## Decisões (Rulings)
 

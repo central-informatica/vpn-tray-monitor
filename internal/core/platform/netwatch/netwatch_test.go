@@ -31,7 +31,10 @@ func TestDecideNetwork(t *testing.T) {
 			[]Route{{PrefixLen: 0, IfType: 23, Alias: "Conexão de Banda Larga", OperUp: true}}, true, false},
 		{"PPPoE caído não conta",
 			[]Route{{PrefixLen: 0, IfType: 23, Alias: "Conexão de Banda Larga"}}, false, false},
-		{"PPP sem alias conta", []Route{{PrefixLen: 0, IfType: 23, OperUp: true}}, true, false},
+		{"PPP sem alias não conta (conservador)", []Route{{PrefixLen: 0, IfType: 23, OperUp: true}}, false, false},
+		{"PPP com alias só de espaços não conta", []Route{{PrefixLen: 0, IfType: 23, Alias: "  ", OperUp: true}}, false, false},
+		{"física + PPP monitorado",
+			[]Route{{PrefixLen: 0, IfType: 23, Alias: "VPN Matriz", OperUp: true}, {PrefixLen: 0, IfType: 6, OperUp: true}}, true, false},
 		{"túnel IKEv2 (131)", []Route{{PrefixLen: 0, IfType: 131, Alias: "Outra", OperUp: true}}, false, false},
 		{"WireGuard (53)", []Route{{PrefixLen: 0, IfType: 53, Alias: "wg0", OperUp: true}}, false, false},
 		{"loopback", []Route{{PrefixLen: 0, IfType: 24, OperUp: true}}, false, false},
@@ -51,6 +54,14 @@ func TestDecideNetwork(t *testing.T) {
 		if c.wantErr && !errors.Is(err, readErr) {
 			t.Errorf("%s: erro deve embrulhar a causa: %v", c.name, err)
 		}
+	}
+
+	// Sem entradas monitoradas (exclude nil), PPP nomeado conta; sem alias, não.
+	if got, err := DecideNetwork([]Route{{PrefixLen: 0, IfType: 23, Alias: "VPN Matriz", OperUp: true}}, nil); !got || err != nil {
+		t.Errorf("exclude nil com PPP nomeado: %v %v, quer true", got, err)
+	}
+	if got, err := DecideNetwork([]Route{{PrefixLen: 0, IfType: 23, OperUp: true}}, nil); got || err != nil {
+		t.Errorf("exclude nil com PPP sem alias: %v %v, quer false", got, err)
 	}
 }
 

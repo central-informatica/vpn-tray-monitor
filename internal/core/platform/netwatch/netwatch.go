@@ -61,12 +61,14 @@ func IsVirtualIfType(t uint32) bool {
 }
 
 // DecideNetwork decide a partir das rotas se há rede: alguma rota padrão (/0)
-// em interface ativa que seja física, ou PPP (IfType 23) cujo alias não seja
-// uma das entradas em exclude (comparação sem diferenciar maiúsculas, após
-// trim). No Windows toda conexão RAS (PPTP, L2TP, SSTP, IKEv2) e o PPPoE são
-// PPP com o nome da entrada como alias: assim a VPN monitorada nunca conta,
-// mas um PPPoE (ou outra discagem não monitorada) conta. Túneis, loopback e
-// virtuais (131, 53, 24) nunca contam.
+// em interface ativa que seja física, ou PPP (IfType 23) com alias não vazio
+// que não seja uma das entradas em exclude (comparação sem diferenciar
+// maiúsculas, após trim). PPP com alias vazio não conta (conservador: não dá
+// para saber se é a VPN monitorada). Premissa: no Windows toda conexão RAS
+// (PPTP, L2TP, SSTP, IKEv2) e o PPPoE aparecem como PPP com o nome da entrada
+// como alias — ainda A VALIDAR numa máquina real. Assim a VPN monitorada
+// nunca conta, mas um PPPoE (ou outra discagem não monitorada) conta. Túneis,
+// loopback e virtuais (131, 53, 24) nunca contam.
 //
 // Interface que sumiu (ErrInterfaceGone) é ignorada; se todas as demais rotas
 // padrão falharam na leitura, o resultado é inconclusivo e volta erro.
@@ -106,6 +108,9 @@ func countsAsNetwork(r Route, exclude []string) bool {
 		return false
 	}
 	alias := strings.TrimSpace(r.Alias)
+	if alias == "" {
+		return false
+	}
 	for _, e := range exclude {
 		if strings.EqualFold(alias, strings.TrimSpace(e)) {
 			return false

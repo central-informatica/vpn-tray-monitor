@@ -154,13 +154,14 @@ próxima observação.
    voltar a contar falhas de alcance.
 5. Sem **rede**: `SemRede`, sem discar e sem gastar backoff; um aviso de
    mudança de rede reavalia. Há rede quando alguma interface ativa com rota
-   padrão é **física**, ou é **PPP** (IfType 23) cujo alias não corresponde
-   (sem diferenciar maiúsculas, após trim) a nenhuma entrada RAS das VPNs da
-   config (ativadas ou não) nem à entrada sondada. No Windows toda conexão RAS
-   (PPTP, L2TP, SSTP, IKEv2) e o PPPoE aparecem como PPP com o nome da entrada
-   como alias: assim a VPN monitorada nunca conta como rede, mas um PPPoE (ou
-   outra discagem não monitorada) conta — máquina cuja única saída é PPPoE
-   disca normalmente. Túneis (131), virtuais (53, ex.: WireGuard) e loopback
+   padrão é **física**, ou é **PPP** (IfType 23) com alias não vazio que não
+   corresponde (sem diferenciar maiúsculas, após trim) a nenhuma entrada RAS
+   das VPNs da config (ativadas ou não) nem à entrada sondada; PPP com alias
+   vazio não conta (conservador). Premissa, ainda a validar numa máquina real:
+   no Windows toda conexão RAS (PPTP, L2TP, SSTP, IKEv2) e o PPPoE aparecem
+   como PPP com o nome da entrada como alias. Assim a VPN monitorada nunca
+   conta como rede, mas um PPPoE (ou outra discagem não monitorada) conta —
+   máquina cuja única saída é PPPoE disca normalmente. Túneis (131), virtuais (53, ex.: WireGuard) e loopback
    nunca contam. Interface que some entre a leitura das rotas e a da interface
    é ignorada; se todas as demais falham na leitura, o resultado é
    inconclusivo e a rede é presumida.
