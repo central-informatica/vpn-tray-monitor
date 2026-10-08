@@ -9,6 +9,7 @@ WIN     := GOOS=windows GOARCH=amd64
 # A conversão da §10.2 (rc → Z×100+N) entra no release do Marco C.
 WINVER  := $(or $(shell echo $(VERSION) | sed -nE 's/^v?([0-9]+)\.([0-9]+)\.([0-9]+).*/\1.\2.\3.0/p'),0.0.0.0)
 WINRES  := go run github.com/tc-hib/go-winres@v0.3.3
+COVER_PKGS := ./internal/core/... ./internal/features/monitor/domain ./internal/features/monitor/service ./internal/features/tray/viewmodel
 
 .PHONY: all lint test cover cover-tray winres build clean
 
@@ -23,16 +24,17 @@ lint:
 test:
 	go test -race -shuffle=on ./...
 
+# Piso de 80 % no total de core/*, features/*/domain, features/*/service e
+# tray/viewmodel (§10.1); os fakes ficam de fora e os *_windows.go nem
+# compilam no Linux (são cobertos pelo job Windows).
 cover:
-	go test -coverprofile=coverage.out ./...
-	go tool cover -func=coverage.out | tail -1
+	go test -coverprofile=coverage.out $$(go list $(COVER_PKGS) | grep -v /platform/fake)
+	go run ./tools/covergate -min 80 -profile coverage.out $(if $(GITHUB_STEP_SUMMARY),-summary "$(GITHUB_STEP_SUMMARY)")
 
-# O view-model da bandeja tem piso de 80 % (§10.1).
+# O view-model da bandeja tem piso próprio de 80 % (Marco B).
 cover-tray:
 	go test -coverprofile=coverage-tray.out ./internal/features/tray/viewmodel/
-	@go tool cover -func=coverage-tray.out | awk '/^total:/ { sub("%", "", $$3); \
-		if ($$3 + 0 < 80) { print "cobertura do viewmodel: " $$3 "% (mínimo 80%)"; exit 1 } \
-		print "cobertura do viewmodel: " $$3 "%" }'
+	go run ./tools/covergate -min 80 -profile coverage-tray.out
 
 # Manifest (comctl32 v6, que o walk exige; DPI por monitor), ícone e versão
 # do vpnmon-tray.exe: gera cmd/vpnmon-tray/rsrc_windows_amd64.syso (não
