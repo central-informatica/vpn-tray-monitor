@@ -39,15 +39,19 @@ const callTimeout = 15 * time.Second
 // Tray é o estado da interface; só é tocado na thread da interface (os
 // eventos chegam por app.Synchronize).
 type Tray struct {
-	o        Options
-	app      *walk.Application
-	ni       *walk.NotifyIcon
-	vm       *viewmodel.VM
-	icons    map[viewmodel.Icon]*walk.Icon
-	dpi      int // DPI em que os ícones foram gerados
-	last     viewmodel.Model
-	settings *settingsWin
-	logs     *logWin
+	o     Options
+	app   *walk.Application
+	ni    *walk.NotifyIcon
+	vm    *viewmodel.VM
+	icons map[viewmodel.Icon]*walk.Icon
+	dpi   int // DPI em que os ícones foram gerados
+	last  viewmodel.Model
+	// iconOK/tipOK dizem se last.Icon/last.ToolTip já foram aplicados com
+	// sucesso: sem isso, um modelo igual ao valor zero de last nunca
+	// dispararia a primeira aplicação nem a nova tentativa após falha.
+	iconOK, tipOK bool
+	settings      *settingsWin
+	logs          *logWin
 }
 
 var iconNames = map[viewmodel.Icon]string{
@@ -208,23 +212,23 @@ func (t *Tray) render(m viewmodel.Model, force bool) {
 		} else {
 			old := t.icons
 			t.icons, t.dpi = icons, dpi
-			t.last.Icon = m.Icon
+			t.last.Icon, t.iconOK = m.Icon, true
 			disposeIcons(old)
 			force = true
 		}
 	}
-	if force || m.Icon != t.last.Icon {
+	if force || !t.iconOK || m.Icon != t.last.Icon {
 		if err := t.ni.SetIcon(t.icons[m.Icon]); err != nil {
 			t.o.Log.Warn("trocando o ícone", "erro", err)
 		} else {
-			t.last.Icon = m.Icon
+			t.last.Icon, t.iconOK = m.Icon, true
 		}
 	}
-	if force || m.ToolTip != t.last.ToolTip {
+	if force || !t.tipOK || m.ToolTip != t.last.ToolTip {
 		if err := t.ni.SetToolTip(m.ToolTip); err != nil {
 			t.o.Log.Warn("trocando o tooltip", "erro", err)
 		} else {
-			t.last.ToolTip = m.ToolTip
+			t.last.ToolTip, t.tipOK = m.ToolTip, true
 		}
 	}
 }
