@@ -76,7 +76,7 @@ func (o *Orchestrator) mutate(f func(c *config.Config) error) error {
 		return &ipc.Error{Code: ipc.CodeInternal,
 			Message: "serviço parando; a mudança foi gravada e vale na próxima partida"}
 	}
-	o.bus.publish(ipc.MustMessage("", ipc.TypeConfigStatus, ipc.ConfigStatus{OK: true}))
+	o.publishConfigStatus(ipc.ConfigStatus{OK: true})
 	return nil
 }
 
@@ -235,7 +235,7 @@ func (o *Orchestrator) ReloadFromDisk() error {
 			// O arquivo voltou igual ao que está em uso (ex.: apagado e
 			// restaurado): nada a reaplicar, mas o aviso de "removido" sai.
 			o.opts.Log.Info("config.json legível de novo; configuração em uso mantida")
-			o.bus.publish(ipc.MustMessage("", ipc.TypeConfigStatus, ipc.ConfigStatus{OK: true}))
+			o.publishConfigStatus(ipc.ConfigStatus{OK: true})
 		}
 		return nil
 	}
@@ -245,12 +245,7 @@ func (o *Orchestrator) ReloadFromDisk() error {
 		msg := "config.json inválido; mantendo a config anterior: " + err.Error()
 		o.opts.Log.Error(msg)
 		o.opts.Events.Warning(msg)
-		st := ipc.ConfigStatus{OK: false, Message: err.Error()}
-		var ve *config.ValidationError
-		if errors.As(err, &ve) {
-			st.Fields = ve.Problems
-		}
-		o.bus.publish(ipc.MustMessage("", ipc.TypeConfigStatus, st))
+		o.publishConfigStatus(invalidStatus(err))
 		return nil
 	}
 	o.mu.Lock()
@@ -262,7 +257,7 @@ func (o *Orchestrator) ReloadFromDisk() error {
 	if err := o.apply(c); err != nil {
 		return nil // Stop chegou durante a recarga
 	}
-	o.bus.publish(ipc.MustMessage("", ipc.TypeConfigStatus, ipc.ConfigStatus{OK: true}))
+	o.publishConfigStatus(ipc.ConfigStatus{OK: true})
 	return nil
 }
 
@@ -280,7 +275,7 @@ func (o *Orchestrator) ConfigUnreadable(err error) {
 	o.mu.Unlock()
 	o.opts.Log.Error(msg)
 	o.opts.Events.Warning(msg)
-	o.bus.publish(ipc.MustMessage("", ipc.TypeConfigStatus, ipc.ConfigStatus{OK: false, Message: msg}))
+	o.publishConfigStatus(ipc.ConfigStatus{OK: false, Message: msg})
 }
 
 // MarkWritten registra o hash do config.json carregado ou gravado fora do
@@ -297,8 +292,32 @@ func (o *Orchestrator) MarkWritten(data []byte) {
 // MarkDiskInvalid registra que o config.json em disco está inválido (na
 // partida, pela montagem; depois, pela recarga). Mudanças pelo pipe ficam
 // recusadas até uma recarga válida.
+//
+// O motivo passa a ir no snapshot (Snapshot.Config): uma bandeja que se
+// inscreve depois, inclusive com o arquivo já inválido na partida, o vê.
 func (o *Orchestrator) MarkDiskInvalid(err error) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	o.diskInvalid = err
+	o.cfgStatus = invalidStatus(err)
+}
+
+// invalidStatus é o configStatus de um config.json inválido, com os
+// problemas por campo quando a validação os aponta.
+func invalidStatus(err error) ipc.ConfigStatus {
+	st := ipc.ConfigStatus{OK: false, Message: err.Error()}
+	var ve *config.ValidationError
+	if errors.As(err, &ve) {
+		st.Fields = ve.Problems
+	}
+	return st
+}
+
+// publishConfigStatus guarda o estado da config (vai em todo snapshot) e o
+// publica, sob o mesmo lock do snapshot: quem se inscreve não perde a troca.
+func (o *Orchestrator) publishConfigStatus(st ipc.ConfigStatus) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.cfgStatus = st
+	o.bus.publish(ipc.MustMessage("", ipc.TypeConfigStatus, st))
 }

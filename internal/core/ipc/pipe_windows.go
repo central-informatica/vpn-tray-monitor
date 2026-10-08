@@ -52,7 +52,7 @@ func dialVerified(ctx context.Context, name string, expected func() (uint32, err
 	}
 	if pid != want {
 		c.Close()
-		return nil, fmt.Errorf("o pipe %s é servido pelo PID %d, não pelo serviço (PID %d); conexão recusada", name, pid, want)
+		return nil, fmt.Errorf("%w: %s é servido pelo PID %d, não pelo serviço (PID %d); conexão recusada", ErrNotService, name, pid, want)
 	}
 	return c, nil
 }

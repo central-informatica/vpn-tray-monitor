@@ -4,6 +4,7 @@ package ipc
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 
 	"github.com/guibsu/vpn-tray-monitor/internal/core/config"
@@ -59,6 +60,10 @@ const (
 	TypeServiceStopping = "serviceStopping"
 )
 
+// ErrNotService: o pipe existe, mas o processo que o serve não é o serviço
+// VPNMonitor (PID diferente do informado pelo SCM). A conexão é recusada.
+var ErrNotService = errors.New("o pipe não é servido pelo serviço VPN Monitor")
+
 // Message é o envelope de toda linha.
 type Message struct {
 	V       int             `json:"v"`
@@ -91,6 +96,25 @@ type Error struct {
 }
 
 func (e *Error) Error() string { return fmt.Sprintf("%s: %s", e.Code, e.Message) }
+
+// Valores de VPNView.State (os mesmos de domain.State; um teste do serviço
+// os amarra) e de ErrorInfo.Class: a bandeja os usa sem importar o monitor.
+const (
+	StateDesconhecido       = "Desconhecido"
+	StateConectada          = "Conectada"
+	StateDegradada          = "Degradada"
+	StateReconectando       = "Reconectando"
+	StateDesconectada       = "Desconectada"
+	StateCredencialInvalida = "CredencialInvalida"
+	StateErroConfig         = "ErroConfig"
+	StatePausada            = "Pausada"
+	StateSemRede            = "SemRede"
+	StateDesativada         = "Desativada"
+
+	ClassTransitorio  = "transitorio"
+	ClassCredencial   = "credencial"
+	ClassConfiguracao = "configuracao"
+)
 
 // Payloads de pedidos.
 type (
@@ -147,6 +171,9 @@ type (
 		LastError        *ErrorInfo `json:"lastError,omitempty"`
 		PausedUntilUnix  int64      `json:"pausedUntilUnix,omitempty"`
 		PausedIndefinite bool       `json:"pausedIndefinite,omitempty"`
+		// BlockedUntilUnix: em CredencialInvalida restaurada do state.json
+		// (sem LastError), o instante em que o serviço tenta de novo sozinho.
+		BlockedUntilUnix int64 `json:"blockedUntilUnix,omitempty"`
 	}
 	ErrorInfo struct {
 		Class   string `json:"class"`
@@ -156,6 +183,9 @@ type (
 	Snapshot struct {
 		VPNs          []VPNView `json:"vpns"`
 		Notifications bool      `json:"notifications"`
+		// Config é o estado atual do config.json: quem se inscreve depois de
+		// um configStatus ruim fica sabendo pelo snapshot.
+		Config *ConfigStatus `json:"config,omitempty"`
 	}
 	NoticeEvent struct {
 		VPN  string `json:"vpn"`

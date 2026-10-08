@@ -670,6 +670,20 @@ func TestStartupWithinRejectionWindowWaits(t *testing.T) {
 	}
 }
 
+// O estado restaurado do state.json chega à bandeja sem LastErr e com o fim
+// da janela, para ela explicar o bloqueio.
+func TestStartupRejectionViewCarriesBlockedUntil(t *testing.T) {
+	w := &stubWorld{network: true}
+	st := config.State{Rejections: map[string]config.Rejection{
+		"matriz": {RejectedAtUnix: t0.Add(-5 * time.Minute).Unix()},
+	}}
+	h := newOrch(t, w, cfgWith(vpnNamed("Matriz")), st)
+	v := h.waitView("Matriz", domain.CredencialInvalida)
+	if v.LastError != nil || v.BlockedUntilUnix != t0.Add(10*time.Minute).Unix() {
+		t.Fatalf("visão restaurada: %+v", v)
+	}
+}
+
 // Fora da janela, a rejeição antiga do state.json não vale.
 func TestStartupAfterRejectionWindowDials(t *testing.T) {
 	w := &stubWorld{network: true}

@@ -27,6 +27,9 @@ func ToView(v config.VPN, s domain.Status, now time.Time) ipc.VPNView {
 	if s.NextAttempt.After(now) {
 		view.NextAttemptUnix = s.NextAttempt.Unix()
 	}
+	if s.State == domain.CredencialInvalida && s.BlockedUntil.After(now) {
+		view.BlockedUntilUnix = s.BlockedUntil.Unix()
+	}
 	if e := s.LastErr; e != nil {
 		view.LastError = &ipc.ErrorInfo{Class: e.Class.String(), Code: e.Code, Message: e.Message}
 	}

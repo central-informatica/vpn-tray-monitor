@@ -114,8 +114,10 @@ type Orchestrator struct {
 	cancelRoot context.CancelFunc
 	stopped    bool
 	cfg        config.Config
-	state      config.State
-	sups       map[string]*running
+	// cfgStatus é o último configStatus publicado; vai em todo snapshot.
+	cfgStatus ipc.ConfigStatus
+	state     config.State
+	sups      map[string]*running
 	// draining são os supervisores que uma recarga está parando; Stop
 	// espera por eles também.
 	draining    map[*running]struct{}
@@ -171,7 +173,7 @@ func New(opts Options, cfg config.Config, st config.State) *Orchestrator {
 	st.Rejections = rejections
 	return &Orchestrator{opts: opts, queue: &DialQueue{}, bus: newBus(256), stopping: make(chan struct{}),
 		cfg: cfg, state: st, sups: map[string]*running{}, draining: map[*running]struct{}{},
-		removed: map[string]removedCred{}}
+		removed: map[string]removedCred{}, cfgStatus: ipc.ConfigStatus{OK: true}}
 }
 
 func errStopping() error {
@@ -664,7 +666,8 @@ func (o *Orchestrator) onUpdate(r *running, sup *Supervisor, u Update) {
 
 func (o *Orchestrator) snapshotLocked() ipc.Snapshot {
 	now := o.opts.Clock.Now()
-	snap := ipc.Snapshot{VPNs: []ipc.VPNView{}, Notifications: o.cfg.Notifications}
+	cs := o.cfgStatus
+	snap := ipc.Snapshot{VPNs: []ipc.VPNView{}, Notifications: o.cfg.Notifications, Config: &cs}
 	for _, v := range o.cfg.VPNs {
 		if r, ok := o.sups[config.NameKey(v.Name)]; ok {
 			snap.VPNs = append(snap.VPNs, ToView(v, r.last, now))

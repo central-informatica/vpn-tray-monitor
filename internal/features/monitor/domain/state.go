@@ -373,7 +373,7 @@ func noticeUp(name string, outage time.Duration) Notice {
 }
 
 func noticeCredential(name string) Notice {
-	return Notice{NoticeCredential, fmt.Sprintf("VPN %s: credencial rejeitada — rode vpnmon-svc credential set \"%s\"", name, name)}
+	return Notice{NoticeCredential, fmt.Sprintf("VPN %s: credencial rejeitada — rode vpnmon-svc credential set \"%s\" --user <usuário>", name, name)}
 }
 
 // ConfigErrorText explica um erro de configuração, com a dica da §4.4 para
