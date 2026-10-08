@@ -49,6 +49,9 @@ type Server struct {
 	// em eventos (a bandeja fica ociosa por horas). Padrão 2 min.
 	IdleTimeout time.Duration
 	OutQueue    int
+	// Events, se não nil, recebe o aviso de Accept falhando há ~1 min e a
+	// volta ao normal (o serviço liga ao Event Log).
+	Events EventReporter
 }
 
 func (s *Server) defaults() {
@@ -107,6 +110,7 @@ func (s *Server) Serve(ctx context.Context, ln net.Listener) error {
 		}
 	}()
 	var delay time.Duration
+	trouble := acceptTrouble{log: s.Log, events: s.Events}
 	for {
 		c, err := ln.Accept()
 		if err != nil {
@@ -117,7 +121,7 @@ func (s *Server) Serve(ctx context.Context, ln net.Listener) error {
 				// criá-lo (squatting); então espera e repete, sem derrubar as
 				// conexões existentes.
 				delay = min(max(2*delay, acceptRetryMin), acceptRetryMax)
-				s.Log.Warn("falha ao aceitar conexão no pipe; nova tentativa", "erro", err, "espera", delay)
+				trouble.failed(time.Now(), err) // 1ª falha e depois 1 linha/min; nunca desiste
 				select {
 				case <-ctx.Done():
 				case <-time.After(delay):
@@ -132,6 +136,7 @@ func (s *Server) Serve(ctx context.Context, ln net.Listener) error {
 			return err // listener fechado de fato (go-winio: ErrPipeListenerClosed == net.ErrClosed)
 		}
 		delay = 0
+		trouble.recovered(time.Now())
 		mu.Lock()
 		// Conferido sob o mutex: uma conexão aceita junto com a parada não
 		// escapa do fechamento em massa.

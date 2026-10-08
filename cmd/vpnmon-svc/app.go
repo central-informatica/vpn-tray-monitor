@@ -369,7 +369,7 @@ func serve(ctx context.Context, p Platform, l layout, clock shared.Clock, ready 
 		}
 	}()
 
-	srv := &ipc.Server{Backend: o, AppVersion: version, Log: log}
+	srv := &ipc.Server{Backend: o, AppVersion: version, Log: log, Events: p.Events}
 	sctx, scancel := context.WithCancel(context.Background())
 	defer scancel()
 	srvErr := make(chan error, 1)
