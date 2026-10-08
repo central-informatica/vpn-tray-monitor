@@ -103,8 +103,12 @@ func (c *Client) connectOnce(ctx context.Context) (Conn, time.Duration) {
 		// ipc.Dial já explica ("serviço VPN Monitor inacessível: …").
 		return Conn{State: Unavailable, Message: err.Error()}, 0
 	}
-	// O emit da sessão também desiste quando ela fecha: sem isso o leitor
-	// ficaria preso atrás de um evento e o close não o destravaria.
+	// Cancelar Run destrava hello e inscrição (que só têm prazo próprio).
+	defer context.AfterFunc(ctx, func() { conn.Close() })()
+	// O emit da sessão desiste com ctx (que já destrava sozinho) e também
+	// quando a sessão fecha por outro motivo, como um close vindo de call
+	// com falha de escrita: sem o done o leitor ficaria preso atrás de um
+	// evento e esse close não o destravaria.
 	var sess atomic.Pointer[session]
 	ready := func(s *session) { sess.Store(s); c.setCurrent(s) }
 	emit := func(ev Event) bool {

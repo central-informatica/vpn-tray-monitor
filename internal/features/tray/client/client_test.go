@@ -261,7 +261,14 @@ func holdServer(t *testing.T) (addr string, drop func()) {
 			}
 		}
 	}()
-	return ln.Addr().String(), func() { (<-conns).Close() }
+	return ln.Addr().String(), func() {
+		select {
+		case c := <-conns:
+			c.Close()
+		case <-time.After(3 * time.Second):
+			t.Error("holdServer: nenhuma conexão para derrubar em 3 s")
+		}
+	}
 }
 
 // Pedido em voo quando a conexão cai sai com ErrNotConnected.
@@ -269,21 +276,19 @@ func TestClientInFlightCallEndsWhenConnectionDrops(t *testing.T) {
 	addr, drop := holdServer(t)
 	c := runClient(t, fastOptions(dialTCP(addr)))
 	waitConn(t, c.Events(), Connected)
-	var cur *session
-	for cur == nil { // a inscrição conclui antes de Call aceitar pedidos
-		c.mu.Lock()
-		cur = c.cur
-		c.mu.Unlock()
-		time.Sleep(time.Millisecond)
-	}
+	cur := waitSession(t, c)
 	res := make(chan error, 1)
 	go func() { res <- c.Call(context.Background(), ipc.TypeStatus, nil, nil) }()
+	deadline := time.Now().Add(3 * time.Second)
 	for { // espera o pedido ficar pendente
 		cur.mu.Lock()
 		n := len(cur.pending)
 		cur.mu.Unlock()
 		if n > 0 {
 			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("o pedido não ficou pendente em 3 s")
 		}
 		time.Sleep(time.Millisecond)
 	}
@@ -298,27 +303,105 @@ func TestClientInFlightCallEndsWhenConnectionDrops(t *testing.T) {
 	}
 }
 
-// O leitor preso em emit (consumidor parado) é solto quando a sessão fecha.
+// waitSession espera a sessão atual ficar publicada (com prazo).
+func waitSession(t *testing.T, c *Client) *session {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		c.mu.Lock()
+		s := c.cur
+		c.mu.Unlock()
+		if s != nil {
+			return s
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatal("nenhuma sessão em 3 s")
+	return nil
+}
+
+// Leitor preso em emit (buffer cheio, ctx vivo) é solto quando a sessão
+// fecha, e Run segue: emite Unavailable assim que o consumidor drena.
 func TestClientReaderNotStuckOnFullEvents(t *testing.T) {
-	b := newBackend()
-	srv := startServer(t, b)
+	srv := startServer(t, newBackend())
 	o := fastOptions(dialTCP(srv.addr))
 	o.EventBuffer = 1
 	c := New(o)
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() { c.Run(ctx); close(done) }()
-	// Ninguém consome: Connected enche o buffer e o snapshot bloqueia o leitor.
-	for i := 0; i < 3; i++ {
-		b.events <- ipc.MustMessage("", ipc.TypeNotice, ipc.NoticeEvent{})
+	defer func() {
+		cancel()
+		for range c.Events() {
+		}
+		<-done
+	}()
+	// Ninguém consome: Connected enche o buffer e o snapshot prende o leitor.
+	s := waitSession(t, c)
+	s.close()
+	select {
+	case <-s.readerDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("o leitor continuou preso em emit depois do close")
 	}
-	time.Sleep(100 * time.Millisecond)
+	deadline := time.After(3 * time.Second)
+	for {
+		select {
+		case ev := <-c.Events():
+			if ev.Kind == EvConn && ev.Conn.State == Unavailable {
+				return
+			}
+		case <-deadline:
+			t.Fatal("Unavailable não chegou depois do close")
+		}
+	}
+}
+
+// Cancelar Run não espera o prazo do hello com serviço travado.
+func TestClientCancelDuringHello(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	accepted := make(chan struct{})
+	go func() {
+		c, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		defer c.Close()
+		close(accepted)
+		buf := make([]byte, 1024)
+		for {
+			if _, err := c.Read(buf); err != nil {
+				return
+			}
+		}
+	}()
+	o := fastOptions(dialTCP(ln.Addr().String()))
+	o.Timeout = 10 * time.Second
+	c := New(o)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { c.Run(ctx); close(done) }()
+	go func() {
+		for range c.Events() {
+		}
+	}()
+	select {
+	case <-accepted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("servidor não recebeu a conexão")
+	}
+	start := time.Now()
 	cancel()
 	select {
 	case <-done:
+		if d := time.Since(start); d > 200*time.Millisecond {
+			t.Fatalf("Run levou %v para voltar", d)
+		}
 	case <-time.After(2 * time.Second):
-		t.Fatal("Run não voltou com o leitor preso em emit")
-	}
-	for range c.Events() {
+		t.Fatal("Run não voltou durante o hello")
 	}
 }
