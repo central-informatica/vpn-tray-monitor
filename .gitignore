@@ -2,9 +2,9 @@
 build/
 dist/
 *.exe
+coverage.out
 
-# Dados locais do app
-secrets/
+# Dados locais
 *.log
 
 # Script da VM de testes local (contém credenciais da VM)

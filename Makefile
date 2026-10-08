@@ -1,34 +1,32 @@
-# Compilacao cruzada de Linux para Windows. Sem CGO o binario nao depende de
-# nenhuma DLL alem das do proprio Windows.
-BUILD    := build
-LDFLAGS  := -s -w
-GOENV    := GOOS=windows GOARCH=amd64 CGO_ENABLED=0
+# Espelha o CI (.github/workflows/ci.yml). Rode `make lint test` antes de abrir PR.
+BUILD   := build
+VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
+COMMIT  ?= $(shell git rev-parse --short HEAD 2>/dev/null)
+DATE    ?= $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
+LDFLAGS := -s -w -buildid= -X main.version=$(VERSION) -X main.commit=$(COMMIT) -X main.date=$(DATE)
+WIN     := GOOS=windows GOARCH=amd64
 
-.PHONY: all build test lint icons clean
+.PHONY: all lint test cover build clean
 
-all: test build
-
-# Gera os dois binarios a partir da mesma fonte:
-#  - vpnmon.exe    aplicacao grafica, o monitor residente (nao abre console)
-#  - vpnmonctl.exe versao console, para -check e -set-password com saida legivel
-build: icons
-	@mkdir -p $(BUILD)
-	$(GOENV) go build -trimpath -ldflags "$(LDFLAGS) -H=windowsgui" -o $(BUILD)/vpnmon.exe    ./cmd/vpnmon
-	$(GOENV) go build -trimpath -ldflags "$(LDFLAGS)"               -o $(BUILD)/vpnmonctl.exe ./cmd/vpnmon
-	@cp -n exemplos/vpn-nativa-windows.json $(BUILD)/config.json 2>/dev/null || true
-	@ls -lh $(BUILD)/*.exe
-
-test:
-	go test ./... -cover
+all: lint test build
 
 lint:
-	gofmt -l . | tee /dev/stderr | (! read)
+	@out=$$(gofmt -l .); if [ -n "$$out" ]; then echo "gofmt pendente:"; echo "$$out"; exit 1; fi
+	go mod tidy -diff
 	go vet ./...
-	GOOS=windows go vet ./...
+	$(WIN) go vet ./...
 
-icons:
-	@go run ./tools/geniconos >/dev/null
-	@cp assets/*.ico internal/trayui/icons/
+test:
+	go test -race -shuffle=on ./...
+
+cover:
+	go test -coverprofile=coverage.out ./...
+	go tool cover -func=coverage.out | tail -1
+
+build:
+	@mkdir -p $(BUILD)
+	$(WIN) CGO_ENABLED=0 go build -trimpath -ldflags "$(LDFLAGS)" -o $(BUILD)/vpnmon-svc.exe ./cmd/vpnmon-svc
+	@ls -lh $(BUILD)/*.exe
 
 clean:
-	rm -rf $(BUILD)
+	rm -rf $(BUILD) coverage.out
