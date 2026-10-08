@@ -92,6 +92,23 @@ func TestLinkProber(t *testing.T) {
 	}
 }
 
+// connectingRAS mostra a entrada ativa mas nunca conectada (handle preso).
+type connectingRAS struct{ *fake.RAS }
+
+func (connectingRAS) Status(ras.Handle) (ras.Status, error) {
+	return ras.Status{State: ras.StateConnecting}, nil
+}
+
+func TestLinkProberReportsLingeringHandle(t *testing.T) {
+	r := fake.NewRAS("VPN Matriz")
+	h := r.SetActive("VPN Matriz")
+	p := LinkProber{RAS: connectingRAS{r}, Net: fake.NewNet()}
+	res, err := p.Probe(context.Background(), "VPN Matriz")
+	if err != nil || res.Up || !res.Network || res.Handle != h {
+		t.Fatalf("entrada ativa não conectada deve vir caída com o handle: %+v %v", res, err)
+	}
+}
+
 type stubCreds struct {
 	creds Credentials
 	err   error

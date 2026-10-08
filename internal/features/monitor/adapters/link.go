@@ -12,7 +12,9 @@ import (
 type LinkResult struct {
 	Up      bool // a entrada RAS está conectada
 	Network bool // há interface física com rota padrão
-	Handle  ras.Handle
+	// Handle da conexão ativa da entrada. Com Up=false e Handle≠0 a entrada
+	// está presa (ativa sem conectar): a discagem precisa desligar antes.
+	Handle ras.Handle
 }
 
 // LinkProber consulta o RAS e a rede.
@@ -39,6 +41,7 @@ func FindActive(c ras.Client, entry string) (ras.ActiveConn, bool, error) {
 // Probe diz se o enlace está de pé e se há rede física. Com o enlace de pé
 // a rede é presumida. Falha ao consultar rotas não impede discar.
 func (p LinkProber) Probe(_ context.Context, entry string) (LinkResult, error) {
+	var lingering ras.Handle
 	a, found, err := FindActive(p.RAS, entry)
 	if err != nil {
 		return LinkResult{}, err
@@ -51,6 +54,7 @@ func (p LinkProber) Probe(_ context.Context, entry string) (LinkResult, error) {
 		if st.State == ras.StateConnected {
 			return LinkResult{Up: true, Network: true, Handle: a.Handle}, nil
 		}
+		lingering = a.Handle
 	}
 	network := true
 	if p.Net != nil {
@@ -58,5 +62,5 @@ func (p LinkProber) Probe(_ context.Context, entry string) (LinkResult, error) {
 			network = ok
 		}
 	}
-	return LinkResult{Network: network}, nil
+	return LinkResult{Network: network, Handle: lingering}, nil
 }
