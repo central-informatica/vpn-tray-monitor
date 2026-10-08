@@ -16,3 +16,5 @@ func realPlatform() (Platform, error) { return Platform{}, platform.ErrNotSuppor
 func readPassword(io.Reader) (string, error) {
 	return "", errors.New("leitura sem eco só no Windows; use --password-stdin")
 }
+
+func stdinIsConsole() bool { return false }

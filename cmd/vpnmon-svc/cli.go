@@ -7,12 +7,14 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"strings"
 	"time"
 
 	"github.com/guibsu/vpn-tray-monitor/internal/core/config"
 	"github.com/guibsu/vpn-tray-monitor/internal/core/ipc"
+	"github.com/guibsu/vpn-tray-monitor/internal/core/platform/acl"
 	"github.com/guibsu/vpn-tray-monitor/internal/core/platform/dpapi"
 	"github.com/guibsu/vpn-tray-monitor/internal/core/platform/svc"
 	"github.com/guibsu/vpn-tray-monitor/internal/features/credentials"
@@ -46,6 +48,8 @@ type env struct {
 	dataDir        func() (string, error)
 	elevated       func() bool
 	dpapi          dpapi.Protector
+	securer        acl.Securer // endurece a pasta de dados antes de gravar segredos
+	stdinConsole   func() bool // stdin é um console (senha digitada exporia eco)
 	readPassword   func(io.Reader) (string, error)
 	dial           func(ctx context.Context) (*ipc.Client, error)
 	platform       func() (Platform, error)
@@ -60,6 +64,8 @@ func defaultEnv() env {
 	return env{
 		stdin: os.Stdin, stdout: os.Stdout, stderr: os.Stderr,
 		dataDir: dataDir, elevated: svc.IsElevated, dpapi: dpapi.New(), readPassword: readPassword,
+		securer:      acl.NewWithLog(func(f string, a ...any) { fmt.Fprintf(os.Stderr, "aviso: "+f+"\n", a...) }),
+		stdinConsole: stdinIsConsole,
 		dial: func(ctx context.Context) (*ipc.Client, error) {
 			c, err := ipc.Dial(ctx)
 			if err != nil {
@@ -71,6 +77,9 @@ func defaultEnv() env {
 		isService: svc.IsService, runService: svc.Run, now: time.Now,
 	}
 }
+
+// errCancelled indica Ctrl+C durante a leitura da senha (código 130).
+var errCancelled = errors.New("cancelado")
 
 // usageError leva ao código de saída 2.
 type usageError struct{ msg string }
@@ -90,6 +99,9 @@ func runCLI(args []string, e env) int {
 	case errors.As(err, &ue):
 		fmt.Fprintf(e.stderr, "%s\n\n%s", ue.msg, usage)
 		return 2
+	case errors.Is(err, errCancelled):
+		fmt.Fprintf(e.stderr, "erro: %v\n", err)
+		return 130
 	default:
 		fmt.Fprintf(e.stderr, "erro: %v\n", err)
 		return 1
@@ -106,6 +118,12 @@ func dispatch(args []string, e env) error {
 		fmt.Fprint(e.stdout, usage)
 		return nil
 	}
+	// O nome do comando é validado antes da elevação: desconhecido é uso (2).
+	switch cmd {
+	case "run", "status", "check", "vpn", "install", "uninstall", "credential", "config":
+	default:
+		return usageError{fmt.Sprintf("comando desconhecido %q", cmd)}
+	}
 	if !e.elevated() {
 		return errors.New("este comando exige um prompt de administrador")
 	}
@@ -113,7 +131,11 @@ func dispatch(args []string, e env) error {
 	case "install":
 		return cmdInstall(e)
 	case "uninstall":
-		return e.uninstall()
+		if err := e.uninstall(); err != nil {
+			return err
+		}
+		fmt.Fprintln(e.stdout, "serviço VPNMonitor removido")
+		return nil
 	case "credential":
 		return cmdCredential(rest, e)
 	case "config":
@@ -160,6 +182,19 @@ func trimEOL(s string) string {
 	return strings.TrimSuffix(s, "\r")
 }
 
+// ensureSecure aplica a ACL da pasta de dados. Quarentena é aviso, não falha.
+func ensureSecure(e env, dir string) error {
+	_, err := e.securer.EnsureDir(dir)
+	switch {
+	case err == nil:
+		return nil
+	case errors.Is(err, acl.ErrQuarantined):
+		fmt.Fprintf(e.stderr, "aviso: %v\n", err)
+		return nil
+	}
+	return fmt.Errorf("protegendo a pasta de dados: %w", err)
+}
+
 func cmdInstall(e env) error {
 	exe, err := os.Executable()
 	if err != nil {
@@ -173,7 +208,7 @@ func cmdInstall(e env) error {
 }
 
 func cmdConfig(args []string, e env) error {
-	if len(args) == 0 || args[0] != "validate" {
+	if len(args) == 0 || args[0] != "validate" || len(args) > 2 {
 		return usageError{"use: config validate [arquivo]"}
 	}
 	path := ""
@@ -210,17 +245,31 @@ func cmdCredential(args []string, e env) error {
 		return err
 	}
 	vault := credentials.Vault{Dir: l.Credentials, DPAPI: e.dpapi}
+	// Antes de qualquer gravação/remoção no cofre, a pasta de dados precisa ter
+	// a ACL restrita (senão herda a do ProgramData e o blob DPAPI de máquina
+	// ficaria legível por qualquer usuário local). Fica antes de ler a config:
+	// a quarentena pode renomear a pasta.
+	if args[0] == "set" || args[0] == "clear" {
+		if err := ensureSecure(e, l.Dir); err != nil {
+			return err
+		}
+	}
 	cfg, cfgErr := config.Load(l.ConfigFile)
-	known := func(name string) bool {
+	// known: só a config inexistente é tolerada (aviso); outro erro bloqueia.
+	known := func(name string) (bool, error) {
 		if cfgErr != nil {
-			return true // sem config legível não dá para conferir
+			if errors.Is(cfgErr, fs.ErrNotExist) {
+				fmt.Fprintln(e.stderr, "aviso: config.json ainda não existe; nome não validado")
+				return true, nil
+			}
+			return false, cfgErr
 		}
 		for _, v := range cfg.VPNs {
 			if config.NameKey(v.Name) == config.NameKey(name) {
-				return true
+				return true, nil
 			}
 		}
-		return false
+		return false, nil
 	}
 	switch args[0] {
 	case "set":
@@ -234,11 +283,20 @@ func cmdCredential(args []string, e env) error {
 		if len(pos) != 1 || *user == "" {
 			return usageError{"use: credential set <vpn> --user U [--password-stdin]"}
 		}
-		if !known(pos[0]) {
+		ok, err := known(pos[0])
+		if err != nil {
+			return err
+		}
+		if !ok {
 			return fmt.Errorf("VPN %q não existe na config", pos[0])
 		}
 		var pw string
 		if *stdin {
+			// Escolha: recusar (em vez de desligar o eco) se stdin for console;
+			// a leitura interativa sem --password-stdin já cuida disso.
+			if e.stdinConsole() {
+				return errors.New("--password-stdin exige entrada redirecionada (pipe); sem ela, omita a flag para digitar sem eco")
+			}
 			line, err := bufio.NewReader(e.stdin).ReadString('\n')
 			if err != nil && line == "" {
 				return fmt.Errorf("lendo a senha: %w", err)

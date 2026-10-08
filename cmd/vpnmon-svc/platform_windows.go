@@ -7,6 +7,7 @@ import (
 	"errors"
 	"io"
 	"os"
+	"os/signal"
 	"path/filepath"
 
 	"golang.org/x/sys/windows"
@@ -49,7 +50,13 @@ func realPlatform() (Platform, error) {
 	}, nil
 }
 
-// readPassword lê uma linha do console sem eco.
+func stdinIsConsole() bool {
+	var mode uint32
+	return windows.GetConsoleMode(windows.Handle(os.Stdin.Fd()), &mode) == nil
+}
+
+// readPassword lê uma linha do console sem eco. Ctrl+C durante a leitura
+// restaura o modo do console e devolve errCancelled.
 func readPassword(in io.Reader) (string, error) {
 	h := windows.Handle(os.Stdin.Fd())
 	var mode uint32
@@ -60,9 +67,27 @@ func readPassword(in io.Reader) (string, error) {
 		return "", err
 	}
 	defer func() { _ = windows.SetConsoleMode(h, mode) }()
-	line, err := bufio.NewReader(in).ReadString('\n')
-	if err != nil && line == "" {
-		return "", err
+
+	sig := make(chan os.Signal, 1)
+	signal.Notify(sig, os.Interrupt)
+	defer signal.Stop(sig)
+
+	type result struct {
+		line string
+		err  error
 	}
-	return trimEOL(line), nil
+	done := make(chan result, 1)
+	go func() {
+		line, err := bufio.NewReader(in).ReadString('\n')
+		done <- result{line, err}
+	}()
+	select {
+	case <-sig:
+		return "", errCancelled // o defer restaura o eco
+	case r := <-done:
+		if r.err != nil && r.line == "" {
+			return "", r.err
+		}
+		return trimEOL(r.line), nil
+	}
 }

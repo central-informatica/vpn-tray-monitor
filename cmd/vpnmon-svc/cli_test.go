@@ -13,9 +13,11 @@ import (
 
 	"github.com/guibsu/vpn-tray-monitor/internal/core/config"
 	"github.com/guibsu/vpn-tray-monitor/internal/core/ipc"
+	"github.com/guibsu/vpn-tray-monitor/internal/core/platform/acl"
 	"github.com/guibsu/vpn-tray-monitor/internal/core/platform/fake"
 	"github.com/guibsu/vpn-tray-monitor/internal/core/platform/svc"
 	"github.com/guibsu/vpn-tray-monitor/internal/features/credentials"
+	"github.com/guibsu/vpn-tray-monitor/internal/shared"
 )
 
 type testEnv struct {
@@ -33,6 +35,8 @@ func newTestEnv(t *testing.T) *testEnv {
 		dataDir:      func() (string, error) { return dir, nil },
 		elevated:     func() bool { return true },
 		dpapi:        fake.DPAPI{},
+		securer:      &fake.ACL{},
+		stdinConsole: func() bool { return false },
 		readPassword: func(io.Reader) (string, error) { return "digitada", nil },
 		dial: func(context.Context) (*ipc.Client, error) {
 			return nil, errors.New("serviço VPN Monitor inacessível")
@@ -131,5 +135,126 @@ func TestCredentialSetClearList(t *testing.T) {
 	te.run("credential", "list")
 	if !strings.Contains(te.out.String(), "Matriz\t—") {
 		t.Fatalf("list após clear: %q", te.out)
+	}
+}
+
+// orderACL registra a ordem EnsureDir x gravação no cofre.
+type orderACL struct {
+	dirs      []string
+	err       error
+	changed   bool
+	credsSeen func() bool // cofre já tem arquivos no momento do EnsureDir?
+	sawCreds  bool
+}
+
+func (o *orderACL) EnsureDir(p string) (bool, error) {
+	o.dirs = append(o.dirs, p)
+	if o.credsSeen != nil && o.credsSeen() {
+		o.sawCreds = true
+	}
+	return o.changed, o.err
+}
+
+func TestCredentialSetHardensDirFirst(t *testing.T) {
+	te := newTestEnv(t)
+	te.writeConfig(t, "Matriz")
+	vault := credentials.Vault{Dir: filepath.Join(te.dir, "credentials"), DPAPI: fake.DPAPI{}}
+	o := &orderACL{credsSeen: func() bool { return vault.Has("Matriz") }}
+	te.securer = o
+	te.stdin = strings.NewReader("x\n")
+	if code := te.run("credential", "set", "Matriz", "--user", "a", "--password-stdin"); code != 0 {
+		t.Fatal(te.errb)
+	}
+	if len(o.dirs) != 1 || o.dirs[0] != te.dir || o.sawCreds || !vault.Has("Matriz") {
+		t.Fatalf("ordem/pasta: %+v", o)
+	}
+}
+
+func TestCredentialACLFailureBlocks(t *testing.T) {
+	te := newTestEnv(t)
+	te.writeConfig(t, "Matriz")
+	vault := credentials.Vault{Dir: filepath.Join(te.dir, "credentials"), DPAPI: fake.DPAPI{}}
+	if err := vault.Set("Matriz", "velho", shared.NewSecret("antiga")); err != nil {
+		t.Fatal(err)
+	}
+	te.securer = &orderACL{err: errors.New("acesso negado")}
+	te.stdin = strings.NewReader("nova\n")
+	if code := te.run("credential", "set", "Matriz", "--user", "novo", "--password-stdin"); code != 1 {
+		t.Fatalf("set: %d", code)
+	}
+	if u, pw, _, _ := vault.Get("Matriz"); u != "velho" || pw.Reveal() != "antiga" {
+		t.Fatal("cofre alterado")
+	}
+	if code := te.run("credential", "clear", "Matriz"); code != 1 || !vault.Has("Matriz") {
+		t.Fatalf("clear: %d", code)
+	}
+}
+
+func TestCredentialQuarantineWarnsAndWrites(t *testing.T) {
+	te := newTestEnv(t)
+	te.writeConfig(t, "Matriz")
+	te.securer = &orderACL{changed: true, err: acl.ErrQuarantined}
+	te.stdin = strings.NewReader("pw\n")
+	if code := te.run("credential", "set", "Matriz", "--user", "a", "--password-stdin"); code != 0 {
+		t.Fatalf("%d %q", code, te.errb)
+	}
+	vault := credentials.Vault{Dir: filepath.Join(te.dir, "credentials"), DPAPI: fake.DPAPI{}}
+	if !strings.Contains(te.errb.String(), "aviso") || !vault.Has("Matriz") {
+		t.Fatalf("%q", te.errb)
+	}
+}
+
+func TestCredentialSetConfigHandling(t *testing.T) {
+	te := newTestEnv(t)
+	vault := credentials.Vault{Dir: filepath.Join(te.dir, "credentials"), DPAPI: fake.DPAPI{}}
+	te.stdin = strings.NewReader("pw\n")
+	if code := te.run("credential", "set", "Matriz", "--user", "a", "--password-stdin"); code != 0 ||
+		!strings.Contains(te.errb.String(), "config.json ainda não existe; nome não validado") || !vault.Has("Matriz") {
+		t.Fatalf("sem config: %d %q", code, te.errb)
+	}
+	// config inválida: bloqueia e não grava.
+	if err := os.WriteFile(filepath.Join(te.dir, "config.json"), []byte(`{"version":2,"vpns":[{"name":""}]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := vault.Clear("Matriz"); err != nil {
+		t.Fatal(err)
+	}
+	te.stdin = strings.NewReader("pw\n")
+	if code := te.run("credential", "set", "Matriz", "--user", "a", "--password-stdin"); code != 1 || vault.Has("Matriz") {
+		t.Fatalf("config inválida: %d", code)
+	}
+}
+
+func TestMinorCLIRules(t *testing.T) {
+	te := newTestEnv(t)
+	te.writeConfig(t, "Matriz")
+	vault := credentials.Vault{Dir: filepath.Join(te.dir, "credentials"), DPAPI: fake.DPAPI{}}
+
+	te.elevated = func() bool { return false }
+	te.stdin = strings.NewReader("pw\n")
+	if code := te.run("credential", "set", "Matriz", "--user", "a", "--password-stdin"); code != 1 || vault.Has("Matriz") {
+		t.Fatalf("não elevado: %d", code)
+	}
+	if code := te.run("formatar"); code != 2 {
+		t.Fatalf("desconhecido sem elevação: %d", code)
+	}
+	te.elevated = func() bool { return true }
+
+	te.stdinConsole = func() bool { return true }
+	te.stdin = strings.NewReader("pw\n")
+	if code := te.run("credential", "set", "Matriz", "--user", "a", "--password-stdin"); code != 1 || vault.Has("Matriz") {
+		t.Fatalf("stdin console: %d", code)
+	}
+	te.stdinConsole = func() bool { return false }
+
+	if code := te.run("config", "validate", "a", "b"); code != 2 {
+		t.Fatalf("validate a b: %d", code)
+	}
+	if code := te.run("uninstall"); code != 0 || !strings.Contains(te.out.String(), "removido") {
+		t.Fatalf("uninstall: %d %q", code, te.out)
+	}
+	te.readPassword = func(io.Reader) (string, error) { return "", errCancelled }
+	if code := te.run("credential", "set", "Matriz", "--user", "a"); code != 130 || vault.Has("Matriz") {
+		t.Fatalf("cancelado: %d", code)
 	}
 }
