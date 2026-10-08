@@ -542,11 +542,9 @@ func TestReconnectAfterTripReopensOnFirstPanic(t *testing.T) {
 	if dials != 3 {
 		t.Fatalf("discagens antes do disjuntor = %d", dials)
 	}
-	var e *ipc.Error
-	// O supervisor recriado pode discar sozinho (e cair) antes de atender:
-	// já reconectando ou indisponível também valem; o que importa é a contagem.
-	if err := h.o.Reconnect("Matriz"); err != nil && (!asIPC(err, &e) ||
-		(e.Code != ipc.CodeAlreadyReconnecting && e.Code != ipc.CodeInternal)) {
+	// O supervisor recriado fica parado (sem tique) até o próprio reconnect
+	// conduzir a única tentativa: a resposta é determinística.
+	if err := h.o.Reconnect("Matriz"); err != nil {
 		t.Fatalf("reconnect: %v", err)
 	}
 	ev := h.waitEvents(6) // panic + disjuntor de novo, sem agendar recriação
@@ -557,7 +555,7 @@ func TestReconnectAfterTripReopensOnFirstPanic(t *testing.T) {
 		h.clk.Advance(time.Minute)
 	}
 	time.Sleep(50 * time.Millisecond)
-	if n := len(w.get().dials); n > dials+1 {
+	if n := len(w.get().dials); n != dials+1 {
 		t.Fatalf("reconnect com o disjuntor aberto rendeu %d discagens", n-dials)
 	}
 	if n := len(h.events.Snapshot()); n != 6 {

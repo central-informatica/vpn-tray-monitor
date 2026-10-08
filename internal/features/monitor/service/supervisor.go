@@ -281,6 +281,12 @@ func (s *Supervisor) Run(ctx context.Context) {
 			return
 		}
 		pendingWake = false
+		// Um despertar que já esteja no canal chegou antes deste ciclo e
+		// é coberto por ele: descartá-lo evita um ciclo a mais.
+		select {
+		case <-s.wake:
+		default:
+		}
 		apply(domain.Input{Kind: domain.InWake})
 	}
 

@@ -99,3 +99,48 @@ func TestRestartDisabled(t *testing.T) {
 		t.Fatalf("%+v", s)
 	}
 }
+
+func TestReconfigureSameEntryKeepsOnlyBlockMemory(t *testing.T) {
+	last := lived(Degradada)
+	last.Op = OpNone
+	last.Blocked = ""
+	last.LastRTT = 40 * time.Millisecond
+	p := params()
+	p.Failures = 5 // só a verificação mudou: backoff intacto
+	s := Reconfigure(last, params(), p, t0, config.Pause{})
+	if s.State != Desconhecido || !s.Since.Equal(t0) || s.Failures != 0 || s.LastRTT != 0 || !s.NextTick.Equal(t0) {
+		t.Fatalf("Degradada deveria virar Desconhecido sem falhas: %+v", s)
+	}
+	assertMemory(t, s, last) // bloqueio, reconexões, WasUp/DownSince e backoff ficam
+
+	// Backoff alterado: a próxima discagem não espera o prazo calculado
+	// com os limites antigos.
+	p = params()
+	p.MaxBackoff = 10 * time.Minute
+	s = Reconfigure(lived(Reconectando), params(), p, t0, config.Pause{})
+	if !s.NextAttempt.IsZero() || s.State != Reconectando || s.BlockedFP != "fp-velha" {
+		t.Fatalf("backoff novo deveria limpar NextAttempt: %+v", s)
+	}
+	p = params()
+	p.Interval = time.Minute
+	if s = Reconfigure(lived(Reconectando), params(), p, t0, config.Pause{}); !s.NextAttempt.IsZero() {
+		t.Fatalf("intervalo novo deveria limpar NextAttempt: %+v", s)
+	}
+
+	// Bloqueio por credencial continua bloqueio, sem tique.
+	b := lived(CredencialInvalida)
+	b.Blocked = CredencialInvalida
+	s = Reconfigure(b, params(), p, t0, config.Pause{})
+	if s.State != CredencialInvalida || s.Blocked != CredencialInvalida || !s.NextTick.IsZero() || s.LastErr != b.LastErr {
+		t.Fatalf("bloqueio perdido: %+v", s)
+	}
+}
+
+func TestOpString(t *testing.T) {
+	for op, want := range map[Op]string{OpNone: "nenhuma", OpProbeLink: "sonda de enlace",
+		OpProbeReach: "verificação de alcance", OpDial: "discagem", OpHangupDial: "desligar e discar", Op(99): "Op(99)"} {
+		if got := op.String(); got != want {
+			t.Errorf("%d: %q", int(op), got)
+		}
+	}
+}

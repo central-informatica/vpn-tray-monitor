@@ -320,8 +320,9 @@ func (o *Orchestrator) apply(cfg config.Config) error {
 // guarda bloqueio e backoff). breakerPanics panics rápidos seguidos abrem o
 // disjuntor. prev é o supervisor anterior da mesma VPN numa recarga: com a
 // mesma entrada RAS, parte do último estado real dele (a memória de
-// credencial rejeitada não se perde); se o disjuntor dele estava aberto, um
-// único panic rápido o reabre. Chamar com o.mu travado.
+// credencial rejeitada não se perde; com a config mudada, por
+// domain.Reconfigure); se o disjuntor dele estava aberto, um único panic
+// rápido o reabre. Chamar com o.mu travado.
 func (o *Orchestrator) launch(v config.VPN, prev *running) *running {
 	ctx, cancel := context.WithCancel(o.ctx)
 	r := &running{vpn: v, cancel: cancel, done: make(chan struct{}), revive: make(chan chan *Supervisor)}
@@ -330,9 +331,12 @@ func (o *Orchestrator) launch(v config.VPN, prev *running) *running {
 	params := domain.ParamsFrom(v)
 	now := o.opts.Clock.Now()
 	quick := 0 // panics seguidos de supervisores de vida curta
-	if prev != nil && prev.vpn.RasEntry == v.RasEntry {
+	switch {
+	case prev != nil && prev.vpn == v: // só reabre o disjuntor
 		r.last = domain.Restart(prev.base, params, now, o.state.Pauses[key])
-	} else {
+	case prev != nil && prev.vpn.RasEntry == v.RasEntry:
+		r.last = domain.Reconfigure(prev.base, domain.ParamsFrom(prev.vpn), params, now, o.state.Pauses[key])
+	default:
 		r.last = domain.Initial(params, now, o.state.Pauses[key])
 	}
 	if prev != nil && prev.tripped {
@@ -346,6 +350,7 @@ func (o *Orchestrator) launch(v config.VPN, prev *running) *running {
 		defer close(r.done)
 		delay := o.opts.RestartDelay
 		var notify chan *Supervisor // reconnect manual esperando o supervisor novo
+		revived := false            // recriado por reconnect manual: ele conduz a tentativa
 		for {
 			var sup *Supervisor
 			sup = NewSupervisor(v, initial, Deps{
@@ -361,7 +366,7 @@ func (o *Orchestrator) launch(v config.VPN, prev *running) *running {
 				notify <- sup
 				notify = nil
 			}
-			if recreated && credentialBlocked(initial) {
+			if recreated && !revived && credentialBlocked(initial) {
 				// O cofre pode ter mudado durante a recriação: o aviso não
 				// pode se perder (o domínio ignora se a impressão não mudou).
 				go func() {
@@ -407,7 +412,9 @@ func (o *Orchestrator) launch(v config.VPN, prev *running) *running {
 				// Um único panic rápido reabre o disjuntor: cada clique não
 				// pode render várias discagens (conta no AD).
 				quick, delay = breakerPanics-1, o.opts.RestartDelay
+				revived = true
 			} else {
+				revived = false
 				// Arma a espera antes de registrar: quem vê o registro já
 				// encontra a recriação agendada.
 				t := o.opts.Clock.NewTimer(delay)
@@ -428,6 +435,12 @@ func (o *Orchestrator) launch(v config.VPN, prev *running) *running {
 			}
 			o.mu.Lock()
 			initial = domain.Restart(base, params, o.opts.Clock.Now(), o.state.Pauses[key])
+			if revived && initial.State != domain.Pausada {
+				// Sem tique: o próprio reconnect (que já leva a impressão
+				// digital atual) conduz a única tentativa, e a resposta dele
+				// não depende de uma corrida com o ciclo automático.
+				initial.NextTick = time.Time{}
+			}
 			r.last, r.base = initial, initial
 			r.tripped = false
 			o.mu.Unlock()
@@ -497,15 +510,22 @@ func runRecovered(ctx context.Context, sup *Supervisor) (p any) {
 }
 
 // onUpdate roda dentro do ator do supervisor: só trava o.mu (nunca mantido
-// enquanto se espera um supervisor) e publica sem bloquear.
+// enquanto se espera um supervisor) e publica sem bloquear. Um supervisor que
+// uma recarga está parando (fora de o.sups) ainda atualiza a base, de onde o
+// próximo parte (uma rejeição 691 chegada na parada não se perde), mas não
+// publica nem grava a pausa.
 func (o *Orchestrator) onUpdate(r *running, sup *Supervisor, u Update) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
-	key := config.NameKey(r.vpn.Name)
-	if o.sups[key] != r || r.sup != sup {
-		return // supervisor antigo (reiniciado, em pânico ou removido)
+	if r.sup != sup {
+		return // supervisor antigo (reiniciado após panic)
 	}
-	r.last, r.base = u.Status, u.Status
+	r.base = u.Status
+	key := config.NameKey(r.vpn.Name)
+	if o.sups[key] != r {
+		return // sendo parado pela recarga, ou removido
+	}
+	r.last = u.Status
 	if u.PauseChanged {
 		// Só a pausa vai para o disco; nada de credencial ou impressão digital.
 		if rec := u.Status.PauseRecord(); rec == (config.Pause{}) {
@@ -696,8 +716,22 @@ func (o *Orchestrator) Reconnect(name string) error {
 		case <-r.done:
 			return unavailable
 		case <-ctx.Done():
+			// O supervisor recriado nasce sem tique: se o pedido não chegar
+			// a ele, um despertar retoma o ciclo automático.
+			go func() {
+				select {
+				case s := <-ch:
+					s.Wake()
+				case <-r.done:
+				}
+			}()
 			return unavailable
 		}
+		rep, err := s.Reconnect(ctx)
+		if err != nil {
+			s.Wake()
+		}
+		return replyErr(rep, err)
 	}
 	return replyErr(s.Reconnect(ctx))
 }

@@ -71,6 +71,23 @@ const (
 	OpHangupDial    // desligar e discar (túnel zumbi, reconexão manual)
 )
 
+// String dá o nome legível da operação (mensagens de log e de panic).
+func (o Op) String() string {
+	switch o {
+	case OpNone:
+		return "nenhuma"
+	case OpProbeLink:
+		return "sonda de enlace"
+	case OpProbeReach:
+		return "verificação de alcance"
+	case OpDial:
+		return "discagem"
+	case OpHangupDial:
+		return "desligar e discar"
+	}
+	return fmt.Sprintf("Op(%d)", int(o))
+}
+
 // DialError descreve a falha de uma discagem.
 type DialError struct {
 	Class   ras.Class
@@ -169,6 +186,27 @@ func Restart(last Status, p Params, now time.Time, pause config.Pause) Status {
 	default:
 		// Verifica já; a sonda de enlace respeita NextAttempt antes de discar.
 		s.NextTick = now
+	}
+	return s
+}
+
+// Reconfigure é o estado ao recriar o supervisor porque a config da VPN mudou
+// sem trocar a entrada RAS (verificação ou limites). Parte de Restart (guarda a
+// memória de bloqueio, as reconexões, WasUp/DownSince e o backoff), mas o que
+// foi medido com a config antiga deixa de valer: Failures e LastRTT zeram e
+// Degradada volta a Desconhecido. Se o intervalo ou o teto do backoff
+// mudaram, NextAttempt (calculado com os limites antigos) é limpo.
+func Reconfigure(last Status, old, p Params, now time.Time, pause config.Pause) Status {
+	s := Restart(last, p, now, pause)
+	if !p.Enabled {
+		return s
+	}
+	s.Failures, s.LastRTT = 0, 0
+	if s.State == Degradada {
+		s.State, s.Since = Desconhecido, now
+	}
+	if old.Interval != p.Interval || old.MaxBackoff != p.MaxBackoff {
+		s.NextAttempt = time.Time{}
 	}
 	return s
 }
