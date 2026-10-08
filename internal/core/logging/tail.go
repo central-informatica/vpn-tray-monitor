@@ -9,6 +9,9 @@ import (
 // Tail devolve no máximo maxBytes do fim do arquivo, começando numa linha
 // inteira. Serve para a bandeja mostrar o log sem acesso à pasta.
 func Tail(path string, maxBytes int64) (string, error) {
+	if maxBytes <= 0 {
+		return "", nil
+	}
 	f, err := os.Open(path)
 	if err != nil {
 		return "", err

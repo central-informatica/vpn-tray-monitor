@@ -103,3 +103,69 @@ func TestRecordingSink(t *testing.T) {
 		t.Fatalf("%+v", ev)
 	}
 }
+
+func TestRotationFailureKeepsLogging(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "vpnmon.log")
+	w, err := OpenRotating(p, 10, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer w.Close()
+	failing := true
+	w.rename = func(from, to string) error {
+		if failing {
+			return os.ErrPermission
+		}
+		return os.Rename(from, to)
+	}
+	for _, s := range []string{"aaaaaaaa\n", "bbbbbbbb\n"} {
+		if _, err := w.Write([]byte(s)); err != nil {
+			t.Fatalf("Write não deveria falhar com rename quebrado: %v", err)
+		}
+	}
+	if b, _ := os.ReadFile(p); string(b) != "aaaaaaaa\nbbbbbbbb\n" {
+		t.Fatalf("log atual = %q", b)
+	}
+	failing = false
+	if _, err := w.Write([]byte("cccccccc\n")); err != nil {
+		t.Fatal(err)
+	}
+	if b, _ := os.ReadFile(p); string(b) != "cccccccc\n" {
+		t.Fatalf("log atual após rotação = %q", b)
+	}
+	if b, _ := os.ReadFile(filepath.Join(dir, "vpnmon.1.log")); string(b) != "aaaaaaaa\nbbbbbbbb\n" {
+		t.Fatalf("vpnmon.1.log = %q", b)
+	}
+}
+
+func TestRedactsKeyVariants(t *testing.T) {
+	var buf bytes.Buffer
+	l := New(&buf, new(slog.LevelVar))
+	l.Info("x",
+		"vpn_password", "v1", "vpnPassword", "v2", "passwd", "v3", "psk", "v4",
+		"api_key", "v5", "credential", "v6", "authorization", "v7", "Api-Key", "v8", "x.token", "v9")
+	l.With("secret_key", "w1").Info("y", "host", "srv", "vpn", "Matriz")
+	l.Info("z", slog.Group("auth", slog.String("senha", "g1"), slog.String("user", "ana")))
+	out := buf.String()
+	for _, bad := range []string{"v1", "v2", "v3", "v4", "v5", "v6", "v7", "v8", "v9", "w1", "g1"} {
+		if strings.Contains(out, "="+bad) {
+			t.Fatalf("%q vazou em:\n%s", bad, out)
+		}
+	}
+	for _, good := range []string{"host=srv", "vpn=Matriz", "auth.user=ana", "auth.senha=***"} {
+		if !strings.Contains(out, good) {
+			t.Fatalf("%q deveria aparecer em:\n%s", good, out)
+		}
+	}
+}
+
+func TestTailNonPositive(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "x.log")
+	_ = os.WriteFile(p, []byte("a\n"), 0o600)
+	for _, n := range []int64{-1, 0} {
+		if got, err := Tail(p, n); err != nil || got != "" {
+			t.Fatalf("Tail(%d) = %q, %v", n, got, err)
+		}
+	}
+}

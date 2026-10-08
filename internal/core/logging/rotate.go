@@ -19,11 +19,14 @@ type RotatingWriter struct {
 	maxFiles int
 	f        *os.File
 	size     int64
+	closed   bool
+	rename   func(from, to string) error
+	remove   func(name string) error
 }
 
 // OpenRotating abre (ou cria) o log em modo append.
 func OpenRotating(path string, maxBytes int64, maxFiles int) (*RotatingWriter, error) {
-	w := &RotatingWriter{path: path, maxBytes: maxBytes, maxFiles: maxFiles}
+	w := &RotatingWriter{path: path, maxBytes: maxBytes, maxFiles: maxFiles, rename: os.Rename, remove: os.Remove}
 	if err := w.open(); err != nil {
 		return nil, err
 	}
@@ -60,17 +63,23 @@ func rotatedName(path string, n int) string {
 	return fmt.Sprintf("%s.%d%s", strings.TrimSuffix(path, ext), n, ext)
 }
 
+// rotate é best-effort: falhas de remove/rename (no Windows, Tail ou antivírus
+// segurando o arquivo) são ignoradas e o arquivo atual é reaberto em append,
+// para o log nunca morrer. A rotação é tentada de novo no próximo estouro.
 func (w *RotatingWriter) rotate() error {
 	if err := w.f.Close(); err != nil {
+		w.f = nil
+		if oerr := w.open(); oerr != nil {
+			return oerr
+		}
 		return err
 	}
-	_ = os.Remove(rotatedName(w.path, w.maxFiles))
+	w.f = nil
+	_ = w.remove(rotatedName(w.path, w.maxFiles))
 	for i := w.maxFiles - 1; i >= 1; i-- {
-		_ = os.Rename(rotatedName(w.path, i), rotatedName(w.path, i+1))
+		_ = w.rename(rotatedName(w.path, i), rotatedName(w.path, i+1))
 	}
-	if err := os.Rename(w.path, rotatedName(w.path, 1)); err != nil {
-		return err
-	}
+	_ = w.rename(w.path, rotatedName(w.path, 1))
 	return w.open()
 }
 
@@ -78,8 +87,13 @@ func (w *RotatingWriter) rotate() error {
 func (w *RotatingWriter) Write(p []byte) (int, error) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	if w.f == nil {
+	if w.closed {
 		return 0, os.ErrClosed
+	}
+	if w.f == nil { // reabertura anterior falhou
+		if err := w.open(); err != nil {
+			return 0, err
+		}
 	}
 	if w.size > 0 && w.size+int64(len(p)) > w.maxBytes {
 		if err := w.rotate(); err != nil {
@@ -95,6 +109,7 @@ func (w *RotatingWriter) Write(p []byte) (int, error) {
 func (w *RotatingWriter) Close() error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
+	w.closed = true
 	if w.f == nil {
 		return nil
 	}

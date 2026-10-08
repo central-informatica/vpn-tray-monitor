@@ -7,14 +7,28 @@ import (
 	"strings"
 )
 
-// sensitiveKeys são chaves de atributo cujo valor nunca vai para o log,
-// mesmo que alguém passe uma string em vez de shared.Secret.
-var sensitiveKeys = map[string]bool{
-	"password": true, "senha": true, "secret": true, "segredo": true, "token": true, "pass": true,
+// sensitiveParts são trechos que, presentes na chave normalizada, marcam o
+// valor como segredo (vpn_password, apiKey, Authorization...), mesmo que
+// alguém passe uma string em vez de shared.Secret.
+var sensitiveParts = []string{
+	"pass", "senha", "secret", "segredo", "token", "psk",
+	"apikey", "credential", "credencial", "authorization",
+}
+
+var keyNormalizer = strings.NewReplacer("_", "", "-", "", ".", "")
+
+func isSensitiveKey(key string) bool {
+	k := keyNormalizer.Replace(strings.ToLower(key))
+	for _, p := range sensitiveParts {
+		if strings.Contains(k, p) {
+			return true
+		}
+	}
+	return false
 }
 
 func redactAttr(_ []string, a slog.Attr) slog.Attr {
-	if sensitiveKeys[strings.ToLower(a.Key)] {
+	if a.Value.Kind() != slog.KindGroup && isSensitiveKey(a.Key) {
 		return slog.String(a.Key, "***")
 	}
 	return a
