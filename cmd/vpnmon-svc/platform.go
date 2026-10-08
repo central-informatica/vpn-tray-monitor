@@ -26,6 +26,9 @@ type Platform struct {
 	Listen   func() (net.Listener, error)
 	Events   logging.EventSink
 	ReadSeed config.SeedReader
+	// TokenOwner informa o dono padrão do token do processo, só para o log da
+	// partida; nil = não registra.
+	TokenOwner func() (string, error)
 	// ReadFile lê config.json (partida, observador e recarga); nil =
 	// os.ReadFile. Os testes simulam com ele a violação de compartilhamento
 	// do Windows, onde chmod não torna o arquivo ilegível.

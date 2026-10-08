@@ -20,6 +20,7 @@ import (
 	"github.com/guibsu/vpn-tray-monitor/internal/core/platform/icmp"
 	"github.com/guibsu/vpn-tray-monitor/internal/core/platform/netwatch"
 	"github.com/guibsu/vpn-tray-monitor/internal/core/platform/ras"
+	"github.com/guibsu/vpn-tray-monitor/internal/core/platform/token"
 )
 
 func defaultDataDir() (string, error) {
@@ -47,6 +48,7 @@ func realPlatform() (Platform, error) {
 	return Platform{
 		RAS: r, Pinger: icmp.New(), Net: nw, DPAPI: dpapi.New(), ACL: acl.NewWithLog,
 		Listen: ipc.Listen, Events: ev, ReadSeed: config.ReadSeedRegistry,
+		TokenOwner: token.DefaultOwner,
 	}, nil
 }
 

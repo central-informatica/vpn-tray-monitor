@@ -231,6 +231,13 @@ func serve(ctx context.Context, p Platform, l layout, clock shared.Clock, ready 
 	case changed:
 		log.Info("segurança da pasta de dados corrigida", "pasta", l.Dir)
 	}
+	if p.TokenOwner != nil {
+		if owner, err := p.TokenOwner(); err != nil {
+			log.Warn("lendo o dono padrão do token do processo", "erro", err)
+		} else {
+			log.Info("dono padrão do token do processo", "dono", owner)
+		}
+	}
 
 	readFile := p.ReadFile
 	if readFile == nil {

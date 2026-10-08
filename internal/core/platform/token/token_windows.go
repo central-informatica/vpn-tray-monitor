@@ -42,6 +42,24 @@ func SetDefaultOwnerAdmins() error {
 	return nil
 }
 
+// DefaultOwner devolve o dono padrão (TokenOwner) do token do processo, no
+// formato "DOMÍNIO\\nome" quando a conta resolve, senão o SID textual.
+func DefaultOwner() (string, error) {
+	var tok windows.Token
+	if err := windows.OpenProcessToken(windows.CurrentProcess(), windows.TOKEN_QUERY, &tok); err != nil {
+		return "", fmt.Errorf("abrindo o token do processo: %w", err)
+	}
+	defer tok.Close()
+	sid, err := defaultOwner(tok)
+	if err != nil {
+		return "", err
+	}
+	if account, domain, _, err := sid.LookupAccount(""); err == nil {
+		return domain + "\\" + account + " (" + sid.String() + ")", nil
+	}
+	return sid.String(), nil
+}
+
 // defaultOwner lê o TokenOwner do token (cópia do SID).
 func defaultOwner(tok windows.Token) (*windows.SID, error) {
 	var n uint32

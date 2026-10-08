@@ -425,6 +425,52 @@ func TestServeCancelledDuringStartupConfigRead(t *testing.T) {
 	}
 }
 
+// A partida registra uma vez, em info, o dono padrão do token; falha na
+// leitura só vira aviso e não impede o serviço.
+func TestServeLogsTokenOwnerOnce(t *testing.T) {
+	for _, fail := range []bool{false, true} {
+		te := newTestEnv(t)
+		te.writeConfig(t, "Matriz")
+		ln, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		p := testPlatform(fake.NewRAS("VPN Matriz", "VPN Filial"), &logging.RecordingSink{}, &fake.ACL{})
+		p.Listen = func() (net.Listener, error) { return ln, nil }
+		p.ReadFile = te.readFile
+		p.TokenOwner = func() (string, error) {
+			if fail {
+				return "", errors.New("sem token")
+			}
+			return `BUILTIN\\Administrators`, nil
+		}
+		ctx, cancel := context.WithCancel(context.Background())
+		done := make(chan error, 1)
+		ready := make(chan *service.Orchestrator, 1)
+		go func() {
+			done <- serve(ctx, p, newLayout(te.dir), shared.RealClock{}, func(o *service.Orchestrator) { ready <- o })
+		}()
+		select {
+		case <-ready:
+		case err := <-done:
+			t.Fatalf("serviço não subiu: %v", err)
+		}
+		cancel()
+		<-done
+		b, _ := os.ReadFile(filepath.Join(te.dir, "logs", "vpnmon.log"))
+		want, other := "dono padrão do token do processo", "sem token"
+		if fail {
+			want, other = "lendo o dono padrão", "BUILTIN"
+		}
+		if strings.Count(string(b), want) != 1 || strings.Contains(string(b), other) {
+			t.Fatalf("fail=%v: log inesperado: %s", fail, b)
+		}
+		if !fail && !strings.Contains(string(b), "level=INFO") && !strings.Contains(string(b), "INFO") {
+			t.Fatalf("esperava nível info: %s", b)
+		}
+	}
+}
+
 // config.json apagado: aviso específico na hora, sem as novas tentativas.
 func TestServeConfigRemovedWarnsImmediately(t *testing.T) {
 	te := newTestEnv(t)
