@@ -7,6 +7,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"reflect"
 	"testing"
 	"time"
 
@@ -59,6 +60,31 @@ func TestWindowsInstallStartPIDUninstall(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	cfg, err := s.Config()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.StartType != mgr.StartAutomatic {
+		t.Fatalf("StartType %d, quer automático", cfg.StartType)
+	}
+	acts, err := s.RecoveryActions()
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantActs := []mgr.RecoveryAction{
+		{Type: mgr.ServiceRestart, Delay: 5 * time.Second},
+		{Type: mgr.ServiceRestart, Delay: 30 * time.Second},
+		{Type: mgr.ServiceRestart, Delay: 60 * time.Second},
+	}
+	if !reflect.DeepEqual(acts, wantActs) {
+		t.Fatalf("ações de recuperação %v, quer %v", acts, wantActs)
+	}
+	if rp, err := s.ResetPeriod(); err != nil || rp != 86400 {
+		t.Fatalf("ResetPeriod %d (%v), quer 86400", rp, err)
+	}
+	if f, err := s.RecoveryActionsOnNonCrashFailures(); err != nil || !f {
+		t.Fatalf("flag de falhas sem crash: %v (%v)", f, err)
+	}
 	if err := s.Start(); err != nil {
 		t.Fatal(err)
 	}
@@ -81,5 +107,39 @@ func TestWindowsInstallStartPIDUninstall(t *testing.T) {
 	}
 	if _, err := servicePIDNamed(name); err == nil {
 		t.Fatal("após Uninstall o serviço não pode responder")
+	}
+}
+
+// A dependência RasMan é gravada pelo Install real; aqui confere via installNamed
+// com a mesma lista que Install usa.
+func TestWindowsInstallRecordsRasManDependency(t *testing.T) {
+	if !IsElevated() {
+		t.Skip("exige processo elevado (o runner do CI é)")
+	}
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	name := fmt.Sprintf("VPNMonitorDep%d", os.Getpid())
+	if err := installNamed(name, name, exe, []string{"RasMan"}); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = uninstallNamed(name) })
+	m, err := mgr.Connect()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer m.Disconnect()
+	s, err := m.OpenService(name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	cfg, err := s.Config()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(cfg.Dependencies, []string{"RasMan"}) {
+		t.Fatalf("dependências %v", cfg.Dependencies)
 	}
 }

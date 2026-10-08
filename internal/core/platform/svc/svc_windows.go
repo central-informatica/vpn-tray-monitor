@@ -3,6 +3,7 @@
 package svc
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -18,8 +19,15 @@ const accepts = svc.AcceptStop | svc.AcceptPreShutdown | svc.AcceptPowerEvent
 
 type handler struct{ hooks Hooks }
 
+// preshutdownTimeoutMs é o tempo que o SCM espera o serviço no preshutdown.
+const preshutdownTimeoutMs = 15000
+
 func (h handler) Execute(_ []string, r <-chan svc.ChangeRequest, s chan<- svc.Status) (bool, uint32) {
 	reqs := make(chan Request)
+	stopWait := h.hooks.StopTimeout
+	if stopWait <= 0 {
+		stopWait = DefaultStopTimeout
+	}
 	stop := make(chan struct{})
 	defer close(stop)
 	send := func(r Request) {
@@ -54,7 +62,7 @@ func (h handler) Execute(_ []string, r <-chan svc.ChangeRequest, s chan<- svc.St
 		case StateRunning:
 			s <- svc.Status{State: svc.Running, Accepts: accepts}
 		case StateStopPending:
-			s <- svc.Status{State: svc.StopPending, WaitHint: uint32(DefaultStopTimeout / time.Millisecond)}
+			s <- svc.Status{State: svc.StopPending, WaitHint: uint32(stopWait / time.Millisecond)}
 		}
 	}
 	return false, Loop(h.hooks, reqs, report)
@@ -75,7 +83,7 @@ func Install(exePath string) error {
 	return installNamed(ServiceName, DisplayName, exePath, []string{"RasMan"})
 }
 
-func installNamed(name, display, exePath string, deps []string, args ...string) error {
+func installNamed(name, display, exePath string, deps []string, args ...string) (err error) {
 	m, err := mgr.Connect()
 	if err != nil {
 		return err
@@ -95,6 +103,12 @@ func installNamed(name, display, exePath string, deps []string, args ...string) 
 		return err
 	}
 	defer s.Close()
+	// Instalação atômica: se algo falhar depois de criar, remove o serviço.
+	defer func() {
+		if err != nil {
+			_ = s.Delete()
+		}
+	}()
 	actions := []mgr.RecoveryAction{
 		{Type: mgr.ServiceRestart, Delay: 5 * time.Second},
 		{Type: mgr.ServiceRestart, Delay: 30 * time.Second},
@@ -102,6 +116,16 @@ func installNamed(name, display, exePath string, deps []string, args ...string) 
 	}
 	if err := s.SetRecoveryActions(actions, uint32((24 * time.Hour).Seconds())); err != nil {
 		return fmt.Errorf("configurando recuperação: %w", err)
+	}
+	// Run que termina com erro limpo vira SERVICE_STOPPED com código de saída,
+	// não crash: sem este flag a recuperação não dispararia.
+	if err := s.SetRecoveryActionsOnNonCrashFailures(true); err != nil {
+		return fmt.Errorf("configurando recuperação em falhas sem crash: %w", err)
+	}
+	info := struct{ PreshutdownTimeout uint32 }{preshutdownTimeoutMs}
+	if err := windows.ChangeServiceConfig2(s.Handle, windows.SERVICE_CONFIG_PRESHUTDOWN_INFO,
+		(*byte)(unsafe.Pointer(&info))); err != nil {
+		return fmt.Errorf("configurando tempo de preshutdown: %w", err)
 	}
 	// O MSI (util:EventSource) ou um install anterior pode já ter registrado a
 	// origem; o x/sys devolve um erro de texto ("registry key already exists"),
@@ -124,13 +148,19 @@ func uninstallNamed(name string) error {
 	defer m.Disconnect()
 	s, err := m.OpenService(name)
 	if err != nil {
-		return fmt.Errorf("o serviço %s não está instalado", name)
+		if errors.Is(err, windows.ERROR_SERVICE_DOES_NOT_EXIST) {
+			return fmt.Errorf("o serviço %s não está instalado", name)
+		}
+		return err
 	}
 	defer s.Close()
+	stopped := true
 	if st, err := s.Query(); err == nil && st.State != svc.Stopped {
 		_, _ = s.Control(svc.Stop)
+		stopped = false
 		for deadline := time.Now().Add(15 * time.Second); time.Now().Before(deadline); time.Sleep(300 * time.Millisecond) {
 			if st, err := s.Query(); err != nil || st.State == svc.Stopped {
+				stopped = true
 				break
 			}
 		}
@@ -139,6 +169,9 @@ func uninstallNamed(name string) error {
 		return err
 	}
 	_ = eventlog.Remove(name)
+	if !stopped {
+		return fmt.Errorf("o serviço %s foi marcado para exclusão, mas não parou em 15 s; será removido quando parar", name)
+	}
 	return nil
 }
 

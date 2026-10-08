@@ -51,15 +51,18 @@ const (
 type Hooks struct {
 	// Run sobe tudo e bloqueia até ctx ser cancelado; deve voltar em StopTimeout.
 	Run func(ctx context.Context) error
-	// OnResume é chamado na retomada de energia.
+	// OnResume é chamado na retomada de energia, em goroutine própria (não
+	// bloqueia o laço do SCM). Uma retomada pode chamá-lo duas vezes
+	// (PBT_APMRESUMEAUTOMATIC e PBT_APMRESUMESUSPEND): deve ser idempotente e rápido.
 	OnResume func()
 	// StopTimeout é o prazo para Run voltar após o pedido de parada.
 	StopTimeout time.Duration
 }
 
 // Loop é o corpo do handler do SCM. Informa estados por report e devolve o
-// código de saída: 0 em parada pedida; 1 se Run terminou sozinho com erro
-// ou não voltou no prazo.
+// código de saída: 0 em parada pedida (mesmo que Run estoure o prazo, para
+// não disparar a recuperação do SCM durante parada/atualização); 1 só se Run
+// terminou sozinho com erro.
 func Loop(h Hooks, reqs <-chan Request, report func(State)) uint32 {
 	if h.StopTimeout <= 0 {
 		h.StopTimeout = DefaultStopTimeout
@@ -90,11 +93,11 @@ func Loop(h Hooks, reqs <-chan Request, report func(State)) uint32 {
 				case <-done:
 					return 0
 				case <-time.After(h.StopTimeout):
-					return 1
+					return 0
 				}
 			case CmdPowerEvent:
 				if (r.EventType == PBT_APMRESUMEAUTOMATIC || r.EventType == PBT_APMRESUMESUSPEND) && h.OnResume != nil {
-					h.OnResume()
+					go h.OnResume()
 				}
 			}
 		}

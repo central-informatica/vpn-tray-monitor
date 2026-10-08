@@ -62,8 +62,50 @@ func TestLoopPreShutdownAndTimeout(t *testing.T) {
 		StopTimeout: 20 * time.Millisecond,
 	}
 	reqs <- Request{Cmd: CmdPreShutdown}
-	if c := Loop(h, reqs, rec.report); c != 1 {
-		t.Fatalf("Run travado deve dar código 1, veio %d", c)
+	if c := Loop(h, reqs, rec.report); c != 0 {
+		t.Fatalf("parada pedida que estoura o prazo deve dar código 0, veio %d", c)
+	}
+}
+
+func TestLoopSuspendDoesNotCallOnResume(t *testing.T) {
+	var rec recorder
+	reqs := make(chan Request)
+	called := make(chan struct{}, 2)
+	h := Hooks{
+		Run:      func(ctx context.Context) error { <-ctx.Done(); return nil },
+		OnResume: func() { called <- struct{}{} },
+	}
+	code := make(chan uint32)
+	go func() { code <- Loop(h, reqs, rec.report) }()
+	reqs <- Request{Cmd: CmdPowerEvent, EventType: 0x4}
+	reqs <- Request{Cmd: CmdStop}
+	<-code
+	select {
+	case <-called:
+		t.Fatal("evento 0x4 (suspensão) não deve chamar OnResume")
+	default:
+	}
+}
+
+func TestLoopBlockingOnResumeDoesNotBlockStop(t *testing.T) {
+	var rec recorder
+	reqs := make(chan Request)
+	h := Hooks{
+		Run:         func(ctx context.Context) error { <-ctx.Done(); return nil },
+		OnResume:    func() { select {} },
+		StopTimeout: time.Second,
+	}
+	code := make(chan uint32)
+	go func() { code <- Loop(h, reqs, rec.report) }()
+	reqs <- Request{Cmd: CmdPowerEvent, EventType: PBT_APMRESUMEAUTOMATIC}
+	reqs <- Request{Cmd: CmdStop}
+	select {
+	case c := <-code:
+		if c != 0 {
+			t.Fatalf("código %d", c)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("OnResume bloqueado travou o laço")
 	}
 }
 
