@@ -114,7 +114,14 @@ type Status struct {
 	// Blocked guarda CredencialInvalida/ErroConfig durante uma pausa.
 	Blocked State
 	// BlockedFP é a impressão digital da credencial rejeitada.
-	BlockedFP     string
+	BlockedFP string
+	// BlockedFPUnknown: a memória veio do state.json, que não guarda a
+	// impressão; a primeira impressão vista depois passa a ser a rejeitada
+	// (nunca conta como mudança).
+	BlockedFPUnknown bool
+	// BlockedUntil, se não zero, é o fim de um bloqueio por credencial que
+	// sai sozinho (memória da partida: fim da janela de 15 min).
+	BlockedUntil  time.Time
 	RejectedAt    time.Time
 	LastManualTry time.Time
 	LastErr       *DialError
@@ -147,9 +154,17 @@ func Initial(p Params, now time.Time, pause config.Pause) Status {
 // impressão digital rejeitada, tentativas manuais, último erro, histórico de
 // reconexões, Attempt/NextAttempt, WasUp e DownSince. A operação em curso se
 // perdeu com o supervisor antigo (Op zera). pause vem do state.json.
+//
+// Desativada guarda só a memória de credencial rejeitada (CredMemoryOf): ao
+// reativar, volta a CredencialInvalida e só sai com credencial nova, com
+// reconexão manual respeitando a janela ou no fim de BlockedUntil.
 func Restart(last Status, p Params, now time.Time, pause config.Pause) Status {
 	if !p.Enabled {
-		return Initial(p, now, pause)
+		s := Initial(p, now, pause)
+		if m, ok := CredMemoryOf(last); ok {
+			s = WithCredMemory(s, m, now)
+		}
+		return s
 	}
 	s := last
 	s.Op = OpNone
@@ -180,6 +195,9 @@ func Restart(last Status, p Params, now time.Time, pause config.Pause) Status {
 		}
 		set(s.Blocked)
 		s.NextTick = time.Time{}
+		if s.Blocked == CredencialInvalida {
+			s.NextTick = s.BlockedUntil // fim da janela da partida (zero = nenhum)
+		}
 	case s.State == Pausada || s.State == Desativada:
 		set(Desconhecido)
 		s.NextTick = now
@@ -232,6 +250,63 @@ func Reconfigure(last Status, old, p Params, now time.Time, pause config.Pause) 
 		if s.State != CredencialInvalida && s.Blocked != CredencialInvalida {
 			s.LastErr = nil
 		}
+	}
+	return s
+}
+
+// CredMemory é a memória de uma credencial rejeitada (§4.7): o que impede
+// discar de novo com ela e bloquear a conta no AD. Sobrevive à recriação do
+// supervisor (desativar/reativar, remover/adicionar, reinício do serviço).
+type CredMemory struct {
+	FP            string
+	FPUnknown     bool // sem impressão (memória vinda do state.json)
+	RejectedAt    time.Time
+	LastManualTry time.Time
+	// Until: o bloqueio sai sozinho nesse instante (zero = só com credencial
+	// nova ou reconexão manual).
+	Until   time.Time
+	LastErr *DialError
+}
+
+// Ref é o instante da última tentativa com a credencial rejeitada: a mais
+// recente entre a rejeição e a tentativa manual.
+func (m CredMemory) Ref() time.Time {
+	if m.LastManualTry.After(m.RejectedAt) {
+		return m.LastManualTry
+	}
+	return m.RejectedAt
+}
+
+// CredMemoryOf extrai a memória de credencial rejeitada de s; ok=false se
+// s não está (nem guarda) um bloqueio por credencial.
+func CredMemoryOf(s Status) (m CredMemory, ok bool) {
+	if s.State != CredencialInvalida && s.Blocked != CredencialInvalida {
+		return CredMemory{}, false
+	}
+	return CredMemory{FP: s.BlockedFP, FPUnknown: s.BlockedFPUnknown, RejectedAt: s.RejectedAt,
+		LastManualTry: s.LastManualTry, Until: s.BlockedUntil, LastErr: s.LastErr}, true
+}
+
+// WithCredMemory aplica a memória a um estado recém-criado (Initial). Ativa:
+// CredencialInvalida, sem ciclo automático (com Until, um tique no fim).
+// Pausada ou Desativada: a memória fica guardada em Blocked e volta ao
+// retomar/reativar.
+func WithCredMemory(s Status, m CredMemory, now time.Time) Status {
+	s.Blocked = CredencialInvalida
+	s.BlockedFP, s.BlockedFPUnknown = m.FP, m.FPUnknown
+	s.RejectedAt, s.LastManualTry, s.BlockedUntil = m.RejectedAt, m.LastManualTry, m.Until
+	switch s.State {
+	case Desativada:
+		s.LastErr = nil // a bandeja não mostra erro de uma VPN desativada
+	case Pausada:
+		s.LastErr = m.LastErr
+	default:
+		s.LastErr = m.LastErr
+		s.Op = OpNone
+		if s.State != CredencialInvalida {
+			s.State, s.Since = CredencialInvalida, now
+		}
+		s.NextTick = m.Until
 	}
 	return s
 }

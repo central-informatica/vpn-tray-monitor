@@ -153,7 +153,7 @@ func (d *Decision) goUp(p Params, now time.Time) {
 	d.Next.Attempt = 0
 	d.Next.NextAttempt = time.Time{}
 	d.Next.WasUp = true
-	d.Next.Blocked = "" // conectada: a memória de bloqueio acabou
+	d.clearCredBlock() // conectada: a memória de bloqueio acabou
 	d.set(Conectada, now)
 }
 
@@ -178,6 +178,13 @@ func onTick(d *Decision, p Params, env Env) {
 		if !s.PausedIndefinite && !env.Now.Before(s.PausedUntil) {
 			resume(d, "", p, env)
 		}
+	case s.State == CredencialInvalida && s.Op == OpNone && credBlockExpired(s, env.Now):
+		// Fim da janela da memória da partida: volta a verificar e discar.
+		d.clearCredBlock()
+		d.Next.LastErr = nil
+		d.set(Desconhecido, env.Now)
+		d.Next.NextTick = time.Time{}
+		d.start(OpProbeLink)
 	case idle(s):
 		d.Next.NextTick = time.Time{}
 		d.start(OpProbeLink)
@@ -318,6 +325,8 @@ func onDial(d *Decision, in Input, p Params, env Env) {
 		d.goDown(CredencialInvalida, p, now)
 		d.Next.Blocked = CredencialInvalida
 		d.Next.BlockedFP = in.Fingerprint
+		d.Next.BlockedFPUnknown = false
+		d.Next.BlockedUntil = time.Time{} // rejeição real: sem prazo
 		d.Next.RejectedAt = now
 		d.Next.NextTick = time.Time{}
 		d.Notices = append(d.Notices, noticeCredential(p.Name))
@@ -353,15 +362,18 @@ func resume(d *Decision, fp string, p Params, env Env) {
 	now := env.Now
 	d.Next.PausedUntil, d.Next.PausedIndefinite = time.Time{}, false
 	b := d.Next.Blocked
-	if b == CredencialInvalida && credChanged(fp, d.Next.BlockedFP) {
+	if b == CredencialInvalida && (credBlockExpired(d.Next, now) || d.credentialChanged(fp)) {
 		b = ""
 	}
 	if b != "" {
 		d.set(b, now)
 		d.Next.NextTick = time.Time{}
+		if b == CredencialInvalida {
+			d.Next.NextTick = d.Next.BlockedUntil
+		}
 		return
 	}
-	d.Next.Blocked = ""
+	d.clearCredBlock()
 	d.set(Desconhecido, now)
 	d.Next.NextTick = time.Time{}
 	d.start(OpProbeLink)

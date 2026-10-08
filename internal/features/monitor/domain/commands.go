@@ -17,6 +17,34 @@ func okReply() *Reply { return &Reply{Code: ReplyOK} }
 // senão cliques repetidos burlariam a janela de proteção da conta no AD.
 func credChanged(fp, blockedFP string) bool { return fp != "" && fp != blockedFP }
 
+// credentialChanged é credChanged contra a credencial rejeitada de d.Next.
+// Com a impressão rejeitada desconhecida (memória do state.json), nada conta
+// como mudança: a primeira impressão não vazia vista vira a rejeitada, e só
+// uma diferente dela, depois, é credencial nova.
+func (d *Decision) credentialChanged(fp string) bool {
+	if d.Next.BlockedFPUnknown {
+		if fp != "" {
+			d.Next.BlockedFP, d.Next.BlockedFPUnknown = fp, false
+		}
+		return false
+	}
+	return credChanged(fp, d.Next.BlockedFP)
+}
+
+// clearCredBlock esquece o bloqueio por credencial (o histórico RejectedAt e
+// LastManualTry fica).
+func (d *Decision) clearCredBlock() {
+	d.Next.Blocked = ""
+	d.Next.BlockedFPUnknown = false
+	d.Next.BlockedUntil = time.Time{}
+}
+
+// credBlockExpired diz se o bloqueio por credencial com prazo (memória da
+// partida) já venceu.
+func credBlockExpired(s Status, now time.Time) bool {
+	return !s.BlockedUntil.IsZero() && !now.Before(s.BlockedUntil)
+}
+
 func onCheckNow(d *Decision) {
 	s := d.Next
 	switch {
@@ -46,7 +74,7 @@ func onReconnect(d *Decision, in Input, env Env) {
 	case s.Op == OpDial:
 		d.Reply = &Reply{ReplyAlreadyReconnecting, "já reconectando"}
 		return
-	case s.State == CredencialInvalida && !credChanged(in.Fingerprint, s.BlockedFP):
+	case s.State == CredencialInvalida && !d.credentialChanged(in.Fingerprint):
 		ref := s.RejectedAt
 		if s.LastManualTry.After(ref) {
 			ref = s.LastManualTry
@@ -106,14 +134,13 @@ func onCredentialChanged(d *Decision, in Input, env Env) {
 	if s.State != CredencialInvalida && !(s.State == Pausada && s.Blocked == CredencialInvalida) {
 		return
 	}
-	if !credChanged(in.Fingerprint, s.BlockedFP) {
+	if !d.credentialChanged(in.Fingerprint) {
 		return
 	}
+	d.clearCredBlock()
 	if s.State == Pausada {
-		d.Next.Blocked = ""
 		return
 	}
-	d.Next.Blocked = ""
 	d.Next.LastErr = nil
 	d.set(Desconhecido, env.Now)
 	d.Next.NextTick = time.Time{}

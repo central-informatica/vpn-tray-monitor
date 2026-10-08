@@ -449,3 +449,31 @@ func TestReloadReadErrorIsReturned(t *testing.T) {
 		t.Fatalf("conteúdo inválido não é erro de leitura: %v", err)
 	}
 }
+
+// I1(a) Desativar e reativar uma VPN bloqueada por credencial não esquece a
+// rejeição: sem credencial nova, nenhuma discagem automática (§4.7).
+func TestSetEnabledOffOnKeepsCredentialBlock(t *testing.T) {
+	w := &stubWorld{network: true, outcomes: rejected()}
+	h := newOrch(t, w, cfgWith(vpnNamed("Matriz")), config.State{})
+	h.waitView("Matriz", domain.CredencialInvalida)
+	if err := h.o.SetEnabled("Matriz", false); err != nil {
+		t.Fatal(err)
+	}
+	h.waitView("Matriz", domain.Desativada)
+	if err := h.o.SetEnabled("Matriz", true); err != nil {
+		t.Fatal(err)
+	}
+	h.waitView("Matriz", domain.CredencialInvalida)
+	for range 30 {
+		h.clk.Advance(time.Minute)
+	}
+	time.Sleep(50 * time.Millisecond)
+	if n := len(w.get().dials); n != 1 {
+		t.Fatalf("reativar discou com a credencial rejeitada: %d discagens", n)
+	}
+	var e *ipc.Error
+	if err := h.o.Reconnect("Matriz"); err != nil && (!asIPC(err, &e) || e.Code == ipc.CodeCredentialRejected) {
+		// Passados 30 min, a reconexão manual é permitida (uma tentativa).
+		t.Fatalf("reconnect após a janela: %v", err)
+	}
+}

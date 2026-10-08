@@ -180,3 +180,44 @@ func TestReconfigureNewEntry(t *testing.T) {
 		t.Fatalf("estado de enlace da entrada antiga: %+v", s)
 	}
 }
+
+// Desativar guarda a memória de credencial rejeitada (não a de ErroConfig,
+// que sai com a config alterada); o resto zera.
+func TestRestartDisabledKeepsCredentialMemory(t *testing.T) {
+	off := params()
+	off.Enabled = false
+	last := lived(CredencialInvalida)
+	last.Blocked = CredencialInvalida
+	s := Restart(last, off, t0, config.Pause{})
+	if s.State != Desativada || s.Blocked != CredencialInvalida || s.BlockedFP != "fp-velha" ||
+		!s.RejectedAt.Equal(last.RejectedAt) || !s.LastManualTry.Equal(last.LastManualTry) ||
+		s.LastErr != nil || !s.NextTick.IsZero() || s.Attempt != 0 {
+		t.Fatalf("Desativada sem a memória de credencial: %+v", s)
+	}
+	e := lived(ErroConfig)
+	e.Blocked = ErroConfig
+	if s := Restart(e, off, t0, config.Pause{}); s.Blocked != "" || s.State != Desativada {
+		t.Fatalf("ErroConfig não deveria ficar guardado: %+v", s)
+	}
+	// Memória guardada numa pausa também passa para Desativada.
+	pz := lived(Pausada)
+	pz.Blocked = CredencialInvalida
+	if s := Restart(pz, off, t0, config.Pause{}); s.Blocked != CredencialInvalida || s.BlockedFP != "fp-velha" {
+		t.Fatalf("memória da pausa perdida: %+v", s)
+	}
+}
+
+func TestCredMemoryOf(t *testing.T) {
+	if _, ok := CredMemoryOf(lived(Conectada)); ok {
+		t.Fatal("sem bloqueio não há memória")
+	}
+	last := lived(Reconectando) // reconnect manual de um bloqueado em curso
+	last.Blocked = CredencialInvalida
+	m, ok := CredMemoryOf(last)
+	if !ok || m.FP != "fp-velha" || !m.RejectedAt.Equal(last.RejectedAt) || !m.LastManualTry.Equal(last.LastManualTry) {
+		t.Fatalf("%+v %v", m, ok)
+	}
+	if m.Ref() != last.LastManualTry {
+		t.Fatalf("referência = a mais recente entre rejeição e tentativa manual: %v", m.Ref())
+	}
+}
