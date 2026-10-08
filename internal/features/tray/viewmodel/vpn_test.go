@@ -116,6 +116,29 @@ func TestVPNItemDetailTruncated(t *testing.T) {
 	}
 }
 
+func TestCredentialCommandQuotes(t *testing.T) {
+	if got := CredentialCommand(`Filial "A"`); got != `vpnmon-svc credential set "Filial \"A\"" --user <usuário>` {
+		t.Fatalf("%q", got)
+	}
+}
+
+func TestLatencySubMillisecond(t *testing.T) {
+	v := ipc.VPNView{Name: "M", State: ipc.StateConectada, CheckKind: "ping", SinceUnix: ago(time.Minute), LastCheckUnix: ago(5 * time.Second)}
+	if got := vpnItem(v, now).Details[0]; got != "Conectada há 1 min · ping <1 ms" {
+		t.Fatalf("%q", got)
+	}
+	v.LastCheckUnix = 0
+	if got := vpnItem(v, now).Details[0]; got != "Conectada há 1 min" {
+		t.Fatalf("sem dado: %q", got)
+	}
+}
+
+func TestIconString(t *testing.T) {
+	if IconRed.String() != "vermelho" || Icon(9).String() != "Icon(9)" {
+		t.Fatal(IconRed.String(), Icon(9).String())
+	}
+}
+
 func TestVPNItemActions(t *testing.T) {
 	type acts struct{ check, reconnect, pause, resume, enabled bool }
 	cases := map[string]struct {
@@ -125,7 +148,7 @@ func TestVPNItemActions(t *testing.T) {
 	}{
 		"conectada":  {ipc.VPNView{State: ipc.StateConectada, Enabled: true}, acts{true, true, true, false, true}, "Desativar"},
 		"credencial": {ipc.VPNView{State: ipc.StateCredencialInvalida, Enabled: true}, acts{true, true, true, false, true}, "Desativar"},
-		"pausada":    {ipc.VPNView{State: ipc.StatePausada, Enabled: true}, acts{false, false, false, true, true}, "Desativar"},
+		"pausada":    {ipc.VPNView{State: ipc.StatePausada, Enabled: true}, acts{false, false, true, true, true}, "Desativar"},
 		"desativada": {ipc.VPNView{State: ipc.StateDesativada}, acts{false, false, false, false, false}, "Ativar"},
 	}
 	for name, c := range cases {

@@ -25,7 +25,17 @@ const (
 )
 
 func (i Icon) String() string {
-	return [...]string{"cinza", "verde", "âmbar", "vermelho"}[i]
+	switch i {
+	case IconGray:
+		return "cinza"
+	case IconGreen:
+		return "verde"
+	case IconAmber:
+		return "âmbar"
+	case IconRed:
+		return "vermelho"
+	}
+	return fmt.Sprintf("Icon(%d)", int(i))
 }
 
 // VPNItem é o submenu de uma VPN. Textos já vêm escapados para menu ("&&").
@@ -176,6 +186,9 @@ func mainLine(v ipc.VPNView, now time.Time) string {
 			parts = append(parts, "só enlace")
 		} else if v.LatencyMs > 0 {
 			parts = append(parts, fmt.Sprintf("%s %d ms", v.CheckKind, v.LatencyMs))
+		} else if v.LastCheckUnix > 0 {
+			// Latência 0 com verificação feita: abaixo de 1 ms, não "sem dado".
+			parts = append(parts, v.CheckKind+" <1 ms")
 		}
 	case ipc.StateDegradada:
 		if v.Failures > 0 {
@@ -239,7 +252,7 @@ func details(v ipc.VPNView, now time.Time) []string {
 
 // CredentialCommand é o comando que grava a credencial de uma VPN.
 func CredentialCommand(vpn string) string {
-	return fmt.Sprintf(`vpnmon-svc credential set "%s" --user <usuário>`, vpn)
+	return fmt.Sprintf(`vpnmon-svc credential set "%s" --user <usuário>`, strings.ReplaceAll(vpn, `"`, `\"`))
 }
 
 // vpnItem monta o submenu de uma VPN.
@@ -255,7 +268,7 @@ func vpnItem(v ipc.VPNView, now time.Time) VPNItem {
 		Details:      details(v, now),
 		CanCheck:     usable,
 		CanReconnect: usable,
-		CanPause:     usable,
+		CanPause:     usable || v.State == ipc.StatePausada, // pausar de novo troca a duração (§4.7)
 		CanResume:    v.State == ipc.StatePausada,
 		Enabled:      v.Enabled,
 		ToggleLabel:  "Desativar",
