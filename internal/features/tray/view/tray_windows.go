@@ -51,6 +51,7 @@ type Tray struct {
 	// dispararia a primeira aplicação nem a nova tentativa após falha.
 	iconOK, tipOK bool
 	settings      *settingsWin
+	warns         warnLimiter // limita o log de falhas repetidas a cada tique
 	logs          *logWin
 	// rasBusy: há um listRasEntries em andamento (não pede outro). rasGen
 	// muda a cada evento de conexão: a resposta de um pedido feito antes de
@@ -237,17 +238,25 @@ func (t *Tray) render(m viewmodel.Model, force bool) {
 	}
 	if force || !t.iconOK || m.Icon != t.last.Icon {
 		if err := t.ni.SetIcon(t.icons[m.Icon]); err != nil {
-			t.o.Log.Warn("trocando o ícone", "erro", err)
+			t.warnLimited("icone", "trocando o ícone", err)
 		} else {
 			t.last.Icon, t.iconOK = m.Icon, true
 		}
 	}
 	if force || !t.tipOK || m.ToolTip != t.last.ToolTip {
 		if err := t.ni.SetToolTip(m.ToolTip); err != nil {
-			t.o.Log.Warn("trocando o tooltip", "erro", err)
+			t.warnLimited("tooltip", "trocando o tooltip", err)
 		} else {
 			t.last.ToolTip, t.tipOK = m.ToolTip, true
 		}
+	}
+}
+
+// warnLimited registra falhas de render, que se repetem a cada tique de 1 s
+// enquanto persistirem: a primeira, mudanças de mensagem e no máximo 1 por minuto.
+func (t *Tray) warnLimited(key, msg string, err error) {
+	if t.warns.allow(key, err.Error(), time.Now()) {
+		t.o.Log.Warn(msg, "erro", err)
 	}
 }
 

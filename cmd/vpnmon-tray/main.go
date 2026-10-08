@@ -4,8 +4,12 @@
 package main
 
 import (
+	"log/slog"
 	"os"
+	"path/filepath"
 	"strings"
+
+	"github.com/guibsu/vpn-tray-monitor/internal/core/logging"
 )
 
 // Preenchidos por -ldflags no build de release.
@@ -33,3 +37,25 @@ func appVersion() string {
 }
 
 func main() { os.Exit(run()) }
+
+// Log da bandeja: um por usuário, em %LOCALAPPDATA%\VPNMonitor (o usuário não
+// lê a pasta do serviço). Pequeno e rotativo: só avisos da interface e o
+// ciclo de vida da bandeja. Limitação aceita: o mesmo usuário em duas
+// sessões (console + RDP) tem duas bandejas no mesmo arquivo; na rotação,
+// uma pode renomear o arquivo que a outra ainda usa e algumas linhas vão
+// parar no vpnmon-tray.1.log (nada se perde nem trava).
+const (
+	trayLogName     = "vpnmon-tray.log"
+	trayLogMaxBytes = 1 << 20
+	trayLogMaxFiles = 3
+)
+
+// openTrayLog abre o log da bandeja em dir (criada se preciso), com a mesma
+// redação de segredos do serviço. close fecha o arquivo.
+func openTrayLog(dir string) (log *slog.Logger, closeLog func(), err error) {
+	w, err := logging.OpenRotating(filepath.Join(dir, trayLogName), trayLogMaxBytes, trayLogMaxFiles)
+	if err != nil {
+		return nil, nil, err
+	}
+	return logging.New(w, new(slog.LevelVar)), func() { _ = w.Close() }, nil
+}
