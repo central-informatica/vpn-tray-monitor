@@ -73,9 +73,13 @@ func ago(now time.Time, unix int64) string {
 func formatStatus(s ipc.Snapshot, now time.Time) string {
 	var b strings.Builder
 	if s.Config != nil && !s.Config.OK {
-		fmt.Fprintf(&b, "aviso: config.json inválido: %s\n", s.Config.Message)
+		// Message já vem pronta do serviço (inclusive com os campos, no caso de
+		// validação); os campos só são listados se a mensagem não os contém.
+		fmt.Fprintf(&b, "aviso: %s\n", s.Config.Message)
 		for _, f := range s.Config.Fields {
-			fmt.Fprintf(&b, "  %s: %s\n", f.Field, f.Message)
+			if !strings.Contains(s.Config.Message, f.Field+": "+f.Message) {
+				fmt.Fprintf(&b, "  %s: %s\n", f.Field, f.Message)
+			}
 		}
 	}
 	if len(s.VPNs) == 0 {
@@ -101,7 +105,7 @@ func formatStatus(s ipc.Snapshot, now time.Time) string {
 			detail = append(detail, fmt.Sprintf("próxima em %s", domain.FormatOutage(next.Sub(now))))
 		}
 		if next := time.Unix(v.BlockedUntilUnix, 0); v.BlockedUntilUnix > 0 && next.After(now) {
-			detail = append(detail, "bloqueada até "+next.Local().Format("15:04"))
+			detail = append(detail, "bloqueada até "+next.Format("15:04"))
 		}
 		switch {
 		case v.PausedIndefinite:
