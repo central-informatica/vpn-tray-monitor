@@ -19,6 +19,40 @@ type Seed struct {
 	Interval  string // INTERVAL
 }
 
+// SeedRegistryPath é a chave (HKLM, visão de 64 bits) que o MSI grava.
+const SeedRegistryPath = `SOFTWARE\VPNMonitor\Seed`
+
+// seedValue liga o nome de um valor do registro (= propriedade do MSI) ao
+// campo do Seed.
+type seedValue struct {
+	name string
+	dst  *string
+}
+
+// values são os valores do seed na ordem da §5.3; leitor do registro e
+// teste do instalador usam esta mesma lista.
+func (s *Seed) values() []seedValue {
+	return []seedValue{
+		{"VPN_ENTRY", &s.VPNEntry},
+		{"VPN_NAME", &s.VPNName},
+		{"CHECK_KIND", &s.CheckKind},
+		{"CHECK_HOST", &s.CheckHost},
+		{"CHECK_PORT", &s.CheckPort},
+		{"INTERVAL", &s.Interval},
+	}
+}
+
+// SeedValueNames devolve os nomes dos valores do seed (propriedades do MSI).
+func SeedValueNames() []string {
+	var s Seed
+	vals := s.values()
+	names := make([]string, len(vals))
+	for i, v := range vals {
+		names[i] = v.name
+	}
+	return names
+}
+
 // SeedReader lê o seed; found=false quando a chave não existe.
 type SeedReader func() (seed Seed, found bool, err error)
 

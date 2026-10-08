@@ -1,0 +1,7 @@
+VPN Monitor
+Copyright (c) 2026 Central Informática. Todos os direitos reservados.
+
+Software de uso interno. É proibido copiar, distribuir ou modificar este
+programa fora da organização sem autorização por escrito.
+
+O programa é fornecido "como está", sem garantias de qualquer tipo.

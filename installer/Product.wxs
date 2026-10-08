@@ -1,0 +1,170 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  MSI do VPN Monitor (spec §9), WiX v5. Gerado por scripts/build-msi.ps1:
+
+    wix build installer/Product.wxs -arch x64 -ext WixToolset.Util.wixext
+      -d ProductVersion=X.Y.Z -d BinDir=<pasta com os dois exes> -o <saída.msi>
+
+  Regras: nenhuma custom action própria (a única CA é a WixRemoveFoldersEx
+  do util:RemoveFolderEx, só com PURGE=1 na desinstalação); nenhuma senha
+  em propriedade. Os valores que o código também conhece (nome do serviço,
+  SDDL da pasta, chave do seed, origem do Event Log, prazos do SCM) são
+  conferidos contra as constantes Go por installer/installer_test.go.
+-->
+<!-- Fabricante: A CONFIRMAR com o usuário. Trocar aqui e no CompanyName dos
+     dois cmd/*/winres/winres.json. -->
+<?define Manufacturer = "Central Informática" ?>
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs"
+     xmlns:util="http://wixtoolset.org/schemas/v4/wxs/util">
+
+  <Package Name="VPN Monitor"
+           Manufacturer="$(var.Manufacturer)"
+           Version="$(var.ProductVersion)"
+           UpgradeCode="3A0A8DBB-61E5-4653-AFE7-63C4D3EF3ACF"
+           Scope="perMachine"
+           InstallerVersion="500"
+           Language="1046"
+           Codepage="1252">
+
+    <SummaryInformation Description="VPN Monitor: mantém as VPNs nativas do Windows conectadas" />
+
+    <!-- Upgrade: a versão anterior sai inteira antes (afterInstallValidate),
+         a ProgramData fica. Downgrade bloqueado. -->
+    <MajorUpgrade DowngradeErrorMessage="Uma versão mais nova do VPN Monitor já está instalada. Desinstale-a antes de instalar esta." />
+
+    <MediaTemplate EmbedCab="yes" />
+
+    <!-- Sem Restart Manager: a bandeja aberta nas sessões não é fechada no
+         upgrade/desinstalação; o exe em uso é trocado na reinicialização
+         (msiexec devolve 3010) e o serviço já roda a versão nova. -->
+    <Property Id="MSIRESTARTMANAGERCONTROL" Value="Disable" />
+
+    <!-- Windows 10 1809 (build 17763), Windows 11 ou Server 2019+, 64 bits.
+         O VersionNT do MSI é congelado em 603 desde o 8.1; o número real do
+         build vem do registro. -->
+    <Property Id="WINBUILD">
+      <RegistrySearch Id="WinBuild" Root="HKLM" Key="SOFTWARE\Microsoft\Windows NT\CurrentVersion"
+                      Name="CurrentBuildNumber" Type="raw" Bitness="always64" />
+    </Property>
+    <Launch Condition="Installed OR (VersionNT64 AND WINBUILD &gt;= 17763)"
+            Message="O VPN Monitor exige Windows 10 1809, Windows 11 ou Windows Server 2019 ou mais novo, de 64 bits." />
+
+    <!-- Seed da primeira configuração (§5.3). Secure: valem em instalação
+         gerenciada (GPO/Intune). Nunca há senha aqui. -->
+    <Property Id="VPN_ENTRY" Secure="yes" />
+    <Property Id="VPN_NAME" Secure="yes" />
+    <Property Id="CHECK_KIND" Secure="yes" />
+    <Property Id="CHECK_HOST" Secure="yes" />
+    <Property Id="CHECK_PORT" Secure="yes" />
+    <Property Id="INTERVAL" Secure="yes" />
+    <!-- PURGE=1 na desinstalação apaga a ProgramData (config, estado, cofre, logs). -->
+    <Property Id="PURGE" Secure="yes" />
+
+    <!-- Caminho da pasta de dados lembrado no registro: a WixRemoveFoldersEx
+         roda antes do CostFinalize, quando as pastas ainda não resolveram. -->
+    <Property Id="VPNMON_DATADIR">
+      <RegistrySearch Id="DataDirSearch" Root="HKLM" Key="SOFTWARE\VPNMonitor"
+                      Name="DataDir" Type="raw" Bitness="always64" />
+    </Property>
+
+    <Icon Id="VPNMonitor.ico" SourceFile="$(sys.SOURCEFILEDIR)..\assets\conectada.ico" />
+    <Property Id="ARPPRODUCTICON" Value="VPNMonitor.ico" />
+    <Property Id="ARPNOMODIFY" Value="1" />
+
+    <StandardDirectory Id="ProgramFiles64Folder">
+      <Directory Id="INSTALLFOLDER" Name="VPN Monitor" />
+    </StandardDirectory>
+    <StandardDirectory Id="CommonAppDataFolder">
+      <Directory Id="DATAFOLDER" Name="VPNMonitor" />
+    </StandardDirectory>
+    <StandardDirectory Id="ProgramMenuFolder" />
+
+    <Feature Id="Main" Title="VPN Monitor" Level="1" AllowAbsent="no">
+      <ComponentGroupRef Id="Programa" />
+      <ComponentGroupRef Id="Dados" />
+    </Feature>
+
+    <ComponentGroup Id="Programa" Directory="INSTALLFOLDER">
+
+      <!-- Serviço (§8): automático, depende do RasMan, LocalSystem. -->
+      <Component Id="Servico" Bitness="always64">
+        <File Id="SvcExe" Source="$(var.BinDir)\vpnmon-svc.exe" KeyPath="yes" />
+        <ServiceInstall Id="Servico"
+                        Name="VPNMonitor"
+                        DisplayName="VPN Monitor"
+                        Description="Mantém as VPNs nativas do Windows conectadas e reconecta após quedas."
+                        Type="ownProcess"
+                        Start="auto"
+                        ErrorControl="normal"
+                        Account="LocalSystem"
+                        Vital="yes">
+          <ServiceDependency Id="RasMan" />
+          <!-- Sem ServiceConfigFailureActions/ServiceConfig nativos: a
+               Microsoft documenta que a MsiServiceConfigFailureActions "is not
+               working as expected" (MsiConfigureServices) e o WiX avisa
+               (WIX1149). A recuperação (5 s/30 s/60 s, zera em 1 dia, também
+               em falha sem crash) e o preshutdown de 15 s são aplicados pelo
+               próprio serviço a cada partida (svc.EnsurePolicy), a mesma
+               política do `vpnmon-svc install`. -->
+        </ServiceInstall>
+        <ServiceControl Id="Servico" Name="VPNMonitor" Start="install" Stop="both" Remove="uninstall" Wait="yes" />
+      </Component>
+
+      <!-- Bandeja: abre em todo login (HKLM Run); o MSI não a abre ao fim
+           (abriria elevada). Atalho anunciado no menu Iniciar. -->
+      <Component Id="Bandeja" Bitness="always64">
+        <File Id="TrayExe" Source="$(var.BinDir)\vpnmon-tray.exe" KeyPath="yes">
+          <Shortcut Id="AtalhoBandeja" Directory="ProgramMenuFolder" Name="VPN Monitor"
+                    Description="Bandeja do VPN Monitor" WorkingDirectory="INSTALLFOLDER"
+                    Icon="VPNMonitor.ico" Advertise="yes" />
+        </File>
+        <RegistryValue Root="HKLM" Key="SOFTWARE\Microsoft\Windows\CurrentVersion\Run"
+                       Name="VPNMonitorTray" Type="string" Value="&quot;[#TrayExe]&quot;" />
+      </Component>
+
+      <Component Id="Documentos" Bitness="always64">
+        <File Id="Licenca" Source="$(sys.SOURCEFILEDIR)LICENCA.txt" KeyPath="yes" />
+        <File Id="Leiame" Source="$(sys.SOURCEFILEDIR)..\README.md" />
+      </Component>
+
+      <!-- Origem do Event Log (§5.6): só registro, com a mesma DLL de
+           mensagens do `vpnmon-svc install` (EventCreate.exe). -->
+      <Component Id="EventLog" Bitness="always64">
+        <util:EventSource Log="Application" Name="VPNMonitor"
+                          EventMessageFile="%SystemRoot%\System32\EventCreate.exe"
+                          SupportsErrors="yes" SupportsWarnings="yes" SupportsInformationals="yes"
+                          KeyPath="yes" />
+      </Component>
+    </ComponentGroup>
+
+    <ComponentGroup Id="Dados">
+      <!-- Pasta de dados (§5.1): dono Administradores, SYSTEM e
+           Administradores com controle total, herança desligada (P). -->
+      <Component Id="PastaDados" Directory="DATAFOLDER" Bitness="always64">
+        <CreateFolder>
+          <PermissionEx Sddl="O:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)" />
+        </CreateFolder>
+        <RegistryValue Root="HKLM" Key="SOFTWARE\VPNMonitor" Name="DataDir" Type="string"
+                       Value="[DATAFOLDER]" KeyPath="yes" />
+        <util:RemoveFolderEx Id="PurgeDados" On="uninstall" Property="VPNMON_DATADIR"
+                             Condition="PURGE=1 AND REMOVE~=&quot;ALL&quot; AND NOT UPGRADINGPRODUCTCODE" />
+      </Component>
+
+      <!-- Seed (§5.3): o serviço lê só no primeiro início sem config.json. -->
+      <Component Id="Seed" Directory="INSTALLFOLDER" Bitness="always64">
+        <!-- Chave do componente: sempre gravada (os valores do seed podem vir
+             vazios). -->
+        <RegistryValue Root="HKLM" Key="SOFTWARE\VPNMonitor" Name="Version" Type="string"
+                       Value="[ProductVersion]" KeyPath="yes" />
+        <RegistryKey Root="HKLM" Key="SOFTWARE\VPNMonitor\Seed">
+          <RegistryValue Name="VPN_ENTRY" Type="string" Value="[VPN_ENTRY]" />
+          <RegistryValue Name="VPN_NAME" Type="string" Value="[VPN_NAME]" />
+          <RegistryValue Name="CHECK_KIND" Type="string" Value="[CHECK_KIND]" />
+          <RegistryValue Name="CHECK_HOST" Type="string" Value="[CHECK_HOST]" />
+          <RegistryValue Name="CHECK_PORT" Type="string" Value="[CHECK_PORT]" />
+          <RegistryValue Name="INTERVAL" Type="string" Value="[INTERVAL]" />
+        </RegistryKey>
+      </Component>
+    </ComponentGroup>
+  </Package>
+</Wix>
