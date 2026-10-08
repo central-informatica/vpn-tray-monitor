@@ -5,14 +5,14 @@ package netwatch
 import "testing"
 
 // Só no job Windows: o runner tem rede, então há rota padrão física.
-func TestWindowsHasPhysicalDefaultRoute(t *testing.T) {
+func TestWindowsHasNetwork(t *testing.T) {
 	w, err := New()
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer w.Close()
-	ok, err := w.HasPhysicalDefaultRoute()
+	ok, err := w.HasNetwork(nil)
 	if err != nil || !ok {
-		t.Fatalf("runner deveria ter rota padrão física: %v %v", ok, err)
+		t.Fatalf("runner deveria ter rede com rota padrão: %v %v", ok, err)
 	}
 }

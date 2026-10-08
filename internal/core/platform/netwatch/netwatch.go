@@ -1,9 +1,13 @@
 // Package netwatch avisa mudanças de endereço/rota e diz se a máquina tem
-// alguma interface física com rota padrão (§4.3 passo 5, §4.6).
+// rede: alguma interface ativa com rota padrão que não seja a própria VPN
+// (§4.3 passo 5, §4.6).
 package netwatch
 
 import (
 	"context"
+	"errors"
+	"fmt"
+	"strings"
 	"time"
 
 	"github.com/guibsu/vpn-tray-monitor/internal/shared"
@@ -14,12 +18,15 @@ type Watcher interface {
 	// Changes entrega as notificações brutas do SO (coalescidas só se o
 	// consumidor atrasar); quem consome aplica Debounce. Um Watcher por processo.
 	Changes() <-chan struct{}
-	// HasPhysicalDefaultRoute diz se alguma interface física ativa tem rota padrão.
-	HasPhysicalDefaultRoute() (bool, error)
+	// HasNetwork diz se há rede: alguma interface ativa com rota padrão que
+	// seja física ou PPP fora de exclude (as entradas RAS monitoradas).
+	// Regra completa em DecideNetwork.
+	HasNetwork(exclude []string) (bool, error)
 	Close() error
 }
 
-// Tipos de interface (ipifcons.h) que não contam como rede física.
+// Tipos de interface (ipifcons.h) que não são físicos; desses, só PPP fora
+// das entradas monitoradas conta como rede (DecideNetwork).
 const (
 	ifTypeSoftwareLoopback = 24
 	ifTypePPP              = 23
@@ -27,11 +34,21 @@ const (
 	ifTypeTunnel           = 131
 )
 
-// Route é uma rota já combinada com os dados da interface.
+// ErrInterfaceGone marca a interface que sumiu entre a leitura das rotas e a
+// da interface: não conta nem como rede nem como falha.
+var ErrInterfaceGone = errors.New("interface sumiu entre as leituras")
+
+// Route é uma rota já combinada com os dados da interface. Err≠nil: a
+// leitura da interface falhou (ErrInterfaceGone se ela sumiu) e os demais
+// campos da interface não valem.
 type Route struct {
 	PrefixLen uint8
 	IfType    uint32
-	OperUp    bool
+	// Alias é o nome da interface; numa interface PPP é o nome da entrada
+	// RAS/conexão discada.
+	Alias  string
+	OperUp bool
+	Err    error
 }
 
 // IsVirtualIfType diz se o tipo é PPP/RAS, túnel, loopback ou virtual.
@@ -43,15 +60,58 @@ func IsVirtualIfType(t uint32) bool {
 	return false
 }
 
-// HasPhysicalDefault decide a partir das rotas: alguma rota padrão (/0) em
-// interface física e ativa? A rota padrão da própria VPN não conta.
-func HasPhysicalDefault(routes []Route) bool {
+// DecideNetwork decide a partir das rotas se há rede: alguma rota padrão (/0)
+// em interface ativa que seja física, ou PPP (IfType 23) cujo alias não seja
+// uma das entradas em exclude (comparação sem diferenciar maiúsculas, após
+// trim). No Windows toda conexão RAS (PPTP, L2TP, SSTP, IKEv2) e o PPPoE são
+// PPP com o nome da entrada como alias: assim a VPN monitorada nunca conta,
+// mas um PPPoE (ou outra discagem não monitorada) conta. Túneis, loopback e
+// virtuais (131, 53, 24) nunca contam.
+//
+// Interface que sumiu (ErrInterfaceGone) é ignorada; se todas as demais rotas
+// padrão falharam na leitura, o resultado é inconclusivo e volta erro.
+func DecideNetwork(routes []Route, exclude []string) (bool, error) {
+	defaults, failed, gone := 0, 0, 0
+	var lastErr error
+	found := false
 	for _, r := range routes {
-		if r.PrefixLen == 0 && r.OperUp && !IsVirtualIfType(r.IfType) {
-			return true
+		if r.PrefixLen != 0 {
+			continue
+		}
+		defaults++
+		switch {
+		case errors.Is(r.Err, ErrInterfaceGone):
+			gone++
+		case r.Err != nil:
+			failed++
+			lastErr = r.Err
+		case r.OperUp && countsAsNetwork(r, exclude):
+			found = true
 		}
 	}
-	return false
+	if found {
+		return true, nil
+	}
+	if failed > 0 && failed == defaults-gone {
+		return false, fmt.Errorf("lendo as interfaces das rotas padrão: %w", lastErr)
+	}
+	return false, nil
+}
+
+func countsAsNetwork(r Route, exclude []string) bool {
+	if !IsVirtualIfType(r.IfType) {
+		return true
+	}
+	if r.IfType != ifTypePPP {
+		return false
+	}
+	alias := strings.TrimSpace(r.Alias)
+	for _, e := range exclude {
+		if strings.EqualFold(alias, strings.TrimSpace(e)) {
+			return false
+		}
+	}
+	return true
 }
 
 // DefaultQuiet é a espera após a última notificação (§4.6): a própria

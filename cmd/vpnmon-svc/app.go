@@ -212,7 +212,12 @@ func serve(ctx context.Context, p Platform, l layout, clock shared.Clock, ready 
 	defer lw.Close()
 	level := new(slog.LevelVar)
 	log := logging.New(lw, level)
-	applyGlobals := func(c config.Config) {
+	// monitored são as entradas RAS da config em uso: a sonda de rede não as
+	// conta como rede (um PPPoE não monitorado conta). applyConfig roda antes
+	// de cada aplicação da config, então o conjunto acompanha as VPNs atuais.
+	monitored := new(adapters.Entries)
+	applyConfig := func(c config.Config) {
+		monitored.SetFrom(c)
 		if lv, err := logging.ParseLevel(c.LogLevel); err == nil {
 			level.Set(lv)
 		}
@@ -253,7 +258,7 @@ func serve(ctx context.Context, p Platform, l layout, clock shared.Clock, ready 
 		log.Warn("seed do instalador ignorado", "erro", boot.SeedProblem)
 		p.Events.Warning("seed do instalador ignorado: " + boot.SeedProblem.Error())
 	}
-	applyGlobals(cfg)
+	applyConfig(cfg)
 
 	st, err := config.LoadState(l.StateFile, clock.Now())
 	var corrupt *config.CorruptStateError
@@ -268,9 +273,9 @@ func serve(ctx context.Context, p Platform, l layout, clock shared.Clock, ready 
 	creds := credBridge{credentials.Resolver{Vault: vault, RAS: p.RAS}}
 	o := service.New(service.Options{
 		Paths: l.Paths, Clock: clock, RAS: p.RAS, Pinger: p.Pinger,
-		Link:   adapters.LinkProber{RAS: p.RAS, Net: p.Net},
+		Link:   adapters.LinkProber{RAS: p.RAS, Net: p.Net, Monitored: monitored},
 		Dialer: &adapters.Dialer{RAS: p.RAS, Creds: creds, Clock: clock},
-		Creds:  creds, Log: log, Events: p.Events, Rand: rand.Float64, OnGlobals: applyGlobals,
+		Creds:  creds, Log: log, Events: p.Events, Rand: rand.Float64, OnConfig: applyConfig,
 		ReadFile: readFile,
 	}, cfg, st)
 	if cfgErr == nil {

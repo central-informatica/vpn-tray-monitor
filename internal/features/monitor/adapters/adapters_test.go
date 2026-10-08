@@ -3,9 +3,11 @@ package adapters
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -90,6 +92,77 @@ func TestLinkProber(t *testing.T) {
 	if _, err := p.Probe(context.Background(), "VPN Matriz"); err == nil {
 		t.Fatal("erro do RAS deve propagar")
 	}
+}
+
+func TestLinkProberPPPoECountsAsNetwork(t *testing.T) {
+	// Única saída é PPPoE (interface PPP): conta como rede; a VPN monitorada
+	// (a própria entrada sondada ou outra da config) não conta.
+	r := fake.NewRAS("VPN Matriz", "Filial")
+	n := fake.NewNet()
+	n.SetPhysical(false)
+	mon := new(Entries)
+	mon.Set([]string{"VPN Matriz", "Filial"})
+	p := LinkProber{RAS: r, Net: n, Monitored: mon}
+	probe := func() bool {
+		t.Helper()
+		res, err := p.Probe(context.Background(), "VPN Matriz")
+		if err != nil {
+			t.Fatal(err)
+		}
+		return res.Network
+	}
+	n.SetPPP("Banda Larga")
+	if !probe() {
+		t.Fatal("PPPoE não monitorado deve contar como rede")
+	}
+	n.SetPPP("FILIAL ")
+	if probe() {
+		t.Fatal("outra VPN monitorada (caixa diferente) não pode contar como rede")
+	}
+	if got := n.LastExclude(); !slices.Contains(got, "Filial") || !slices.Contains(got, "VPN Matriz") {
+		t.Fatalf("exclusões repassadas: %q", got)
+	}
+	// A entrada sondada é excluída mesmo fora do conjunto (ex.: "vpn check").
+	p.Monitored = nil
+	n.SetPPP("vpn matriz")
+	if probe() {
+		t.Fatal("a própria entrada sondada não pode contar como rede")
+	}
+	// A config muda: o conjunto novo vale na próxima sonda.
+	p.Monitored = mon
+	mon.Set([]string{"VPN Matriz"})
+	n.SetPPP("Filial")
+	if !probe() {
+		t.Fatal("entrada que saiu da config passa a contar como rede")
+	}
+}
+
+func TestEntriesConcurrent(t *testing.T) {
+	var e Entries
+	if e.List() != nil {
+		t.Fatal("vazio deve ser nil")
+	}
+	var nilE *Entries
+	if nilE.List() != nil {
+		t.Fatal("nil deve ser seguro")
+	}
+	in := []string{"A"}
+	e.Set(in)
+	in[0] = "mexido"
+	if got := e.List(); len(got) != 1 || got[0] != "A" {
+		t.Fatalf("Set deve copiar: %q", got)
+	}
+	e.SetFrom(config.Config{VPNs: []config.VPN{{RasEntry: "Matriz"}, {RasEntry: "Filial", Enabled: false}}})
+	if got := e.List(); !slices.Equal(got, []string{"Matriz", "Filial"}) {
+		t.Fatalf("SetFrom: %q", got)
+	}
+	var wg sync.WaitGroup
+	for i := range 4 {
+		wg.Add(2)
+		go func() { defer wg.Done(); e.Set([]string{fmt.Sprint(i)}) }()
+		go func() { defer wg.Done(); _ = e.List() }()
+	}
+	wg.Wait()
 }
 
 // connectingRAS mostra a entrada ativa mas nunca conectada (handle preso).

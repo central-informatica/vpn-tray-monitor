@@ -4,7 +4,6 @@ package netwatch
 
 import (
 	"errors"
-	"fmt"
 	"sync"
 	"unsafe"
 
@@ -46,36 +45,32 @@ func New() (Watcher, error) {
 
 func (w *winWatcher) Changes() <-chan struct{} { return rawChanges }
 
-func (w *winWatcher) HasPhysicalDefaultRoute() (bool, error) {
+func (w *winWatcher) HasNetwork(exclude []string) (bool, error) {
 	var table *windows.MibIpForwardTable2
 	if err := windows.GetIpForwardTable2(windows.AF_UNSPEC, &table); err != nil {
 		return false, err
 	}
 	defer windows.FreeMibTable(unsafe.Pointer(table))
 	var routes []Route
-	defaults, failed, gone := 0, 0, 0
-	var lastErr error
 	for _, r := range table.Rows() {
 		if r.DestinationPrefix.PrefixLength != 0 {
 			continue
 		}
-		defaults++
 		row := windows.MibIfRow2{InterfaceLuid: r.InterfaceLuid, InterfaceIndex: r.InterfaceIndex}
 		if err := windows.GetIfEntry2Ex(windows.MibIfEntryNormalWithoutStatistics, &row); err != nil {
 			if errors.Is(err, windows.ERROR_FILE_NOT_FOUND) {
-				gone++ // a interface sumiu entre as duas leituras
-				continue
+				err = ErrInterfaceGone
 			}
-			failed++
-			lastErr = err
+			routes = append(routes, Route{Err: err})
 			continue
 		}
-		routes = append(routes, Route{PrefixLen: 0, IfType: row.Type, OperUp: row.OperStatus == windows.IfOperStatusUp})
+		routes = append(routes, Route{
+			IfType: row.Type,
+			Alias:  windows.UTF16ToString(row.Alias[:]),
+			OperUp: row.OperStatus == windows.IfOperStatusUp,
+		})
 	}
-	if failed > 0 && failed == defaults-gone {
-		return false, fmt.Errorf("lendo as interfaces das rotas padrão: %w", lastErr)
-	}
-	return HasPhysicalDefault(routes), nil
+	return DecideNetwork(routes, exclude)
 }
 
 func (w *winWatcher) Close() error {

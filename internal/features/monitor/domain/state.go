@@ -65,7 +65,7 @@ type Op int
 
 const (
 	OpNone       Op = iota
-	OpProbeLink     // ras.Status + presença de rede física
+	OpProbeLink     // ras.Status + presença de rede (física ou PPP não monitorada)
 	OpProbeReach    // ping/tcp
 	OpDial          // discar
 	OpHangupDial    // desligar e discar (túnel zumbi, reconexão manual)

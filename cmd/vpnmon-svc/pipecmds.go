@@ -279,13 +279,13 @@ func cmdCheck(args []string, e env) error {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 40*time.Second)
 	defer cancel()
-	link, err := adapters.LinkProber{RAS: p.RAS, Net: p.Net}.Probe(ctx, vpn.RasEntry)
+	link, err := adapters.LinkProber{RAS: p.RAS, Net: p.Net, Monitored: adapters.EntriesOf(cfg)}.Probe(ctx, vpn.RasEntry)
 	if err != nil {
 		return fmt.Errorf("consultando o RAS: %w", err)
 	}
 	switch {
 	case !link.Network:
-		fmt.Fprintf(e.stdout, "%s: sem rede física com rota padrão\n", vpn.Name)
+		fmt.Fprintf(e.stdout, "%s: sem rede com rota padrão (física ou PPPoE; a VPN não conta)\n", vpn.Name)
 		return errCheckFailed
 	case !link.Up:
 		fmt.Fprintf(e.stdout, "%s: enlace caído (entrada %q não conectada)\n", vpn.Name, vpn.RasEntry)

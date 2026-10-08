@@ -2,29 +2,54 @@ package netwatch
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
 	"github.com/guibsu/vpn-tray-monitor/internal/shared"
 )
 
-func TestHasPhysicalDefault(t *testing.T) {
+func TestDecideNetwork(t *testing.T) {
+	monitored := []string{"VPN Matriz", " Filial SP "}
+	readErr := errors.New("acesso negado")
 	cases := []struct {
-		name   string
-		routes []Route
-		want   bool
+		name    string
+		routes  []Route
+		want    bool
+		wantErr bool
 	}{
-		{"sem rotas", nil, false},
-		{"ethernet com padrão", []Route{{0, 6, true}}, true},
-		{"wifi com padrão", []Route{{0, 71, true}}, true},
-		{"só a VPN (PPP) tem padrão", []Route{{0, 23, true}, {24, 6, true}}, false},
-		{"túnel IKEv2", []Route{{0, 131, true}}, false},
-		{"ethernet caída", []Route{{0, 6, false}}, false},
-		{"ethernet sem padrão", []Route{{24, 6, true}}, false},
+		{"sem rotas", nil, false, false},
+		{"ethernet com padrão", []Route{{PrefixLen: 0, IfType: 6, OperUp: true}}, true, false},
+		{"wifi com padrão", []Route{{PrefixLen: 0, IfType: 71, OperUp: true}}, true, false},
+		{"ethernet caída", []Route{{PrefixLen: 0, IfType: 6}}, false, false},
+		{"ethernet sem padrão", []Route{{PrefixLen: 24, IfType: 6, OperUp: true}}, false, false},
+		{"só a VPN monitorada (PPP) tem padrão",
+			[]Route{{PrefixLen: 0, IfType: 23, Alias: "VPN Matriz", OperUp: true}, {PrefixLen: 24, IfType: 6, OperUp: true}}, false, false},
+		{"VPN monitorada com caixa e espaços diferentes",
+			[]Route{{PrefixLen: 0, IfType: 23, Alias: "  vpn MATRIZ ", OperUp: true}, {PrefixLen: 0, IfType: 23, Alias: "filial sp", OperUp: true}}, false, false},
+		{"PPPoE (PPP não monitorado) conta",
+			[]Route{{PrefixLen: 0, IfType: 23, Alias: "Conexão de Banda Larga", OperUp: true}}, true, false},
+		{"PPPoE caído não conta",
+			[]Route{{PrefixLen: 0, IfType: 23, Alias: "Conexão de Banda Larga"}}, false, false},
+		{"PPP sem alias conta", []Route{{PrefixLen: 0, IfType: 23, OperUp: true}}, true, false},
+		{"túnel IKEv2 (131)", []Route{{PrefixLen: 0, IfType: 131, Alias: "Outra", OperUp: true}}, false, false},
+		{"WireGuard (53)", []Route{{PrefixLen: 0, IfType: 53, Alias: "wg0", OperUp: true}}, false, false},
+		{"loopback", []Route{{PrefixLen: 0, IfType: 24, OperUp: true}}, false, false},
+		{"interface sumiu entre as leituras", []Route{{PrefixLen: 0, Err: ErrInterfaceGone}}, false, false},
+		{"uma falha, outra física ok",
+			[]Route{{PrefixLen: 0, Err: readErr}, {PrefixLen: 0, IfType: 6, OperUp: true}}, true, false},
+		{"uma falha, outra sumiu: todas as legíveis falharam",
+			[]Route{{PrefixLen: 0, Err: readErr}, {PrefixLen: 0, Err: ErrInterfaceGone}}, false, true},
+		{"todas falham", []Route{{PrefixLen: 0, Err: readErr}, {PrefixLen: 0, Err: readErr}}, false, true},
+		{"falha em rota não padrão não conta", []Route{{PrefixLen: 24, Err: readErr}}, false, false},
 	}
 	for _, c := range cases {
-		if got := HasPhysicalDefault(c.routes); got != c.want {
-			t.Errorf("%s: %v, quer %v", c.name, got, c.want)
+		got, err := DecideNetwork(c.routes, monitored)
+		if got != c.want || (err != nil) != c.wantErr {
+			t.Errorf("%s: %v %v, quer %v (erro=%v)", c.name, got, err, c.want, c.wantErr)
+		}
+		if c.wantErr && !errors.Is(err, readErr) {
+			t.Errorf("%s: erro deve embrulhar a causa: %v", c.name, err)
 		}
 	}
 }

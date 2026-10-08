@@ -4,6 +4,7 @@ import (
 	"errors"
 	"io/fs"
 	"os"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -69,11 +70,11 @@ func TestAddUpdateRemoveVPN(t *testing.T) {
 	}
 }
 
-func TestSetGlobalCallsOnGlobals(t *testing.T) {
+func TestSetGlobalCallsOnConfig(t *testing.T) {
 	w := &stubWorld{up: true, network: true}
 	h := newOrch(t, w, cfgWith(), config.State{})
 	var got config.Config
-	h.o.opts.OnGlobals = func(c config.Config) { got = c }
+	h.o.opts.OnConfig = func(c config.Config) { got = c }
 	lvl, off := "debug", false
 	if err := h.o.SetGlobal(ipc.SetGlobalRequest{LogLevel: &lvl, Notifications: &off}); err != nil {
 		t.Fatal(err)
@@ -88,6 +89,29 @@ func TestSetGlobalCallsOnGlobals(t *testing.T) {
 	}
 	if c, _ := config.Load(h.paths.ConfigFile); c.LogLevel != "debug" {
 		t.Fatal("config inválida não pode ser gravada")
+	}
+}
+
+func TestAddVPNCallsOnConfigBeforeLaunch(t *testing.T) {
+	// A sonda de rede exclui as entradas monitoradas: o conjunto precisa
+	// conter a VPN nova antes de o supervisor dela sondar pela primeira vez.
+	w := &stubWorld{up: true, network: true}
+	h := newOrch(t, w, cfgWith(), config.State{})
+	var entries []string
+	h.o.opts.OnConfig = func(c config.Config) {
+		entries = entries[:0]
+		for _, v := range c.VPNs {
+			entries = append(entries, v.RasEntry)
+		}
+		if len(h.o.Status().VPNs) == len(c.VPNs) {
+			t.Error("OnConfig deve rodar antes de aplicar a config")
+		}
+	}
+	if err := h.o.AddVPN(config.RawVPN{Name: "Filial", RasEntry: "VPN Filial", Check: &config.RawCheck{Kind: config.CheckLink}}); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Contains(entries, "VPN Filial") {
+		t.Fatalf("entradas repassadas: %q", entries)
 	}
 }
 

@@ -70,7 +70,7 @@ func (o *Orchestrator) mutate(f func(c *config.Config) error) error {
 	o.mu.Lock()
 	o.lastWritten = config.ContentHash(data)
 	o.mu.Unlock()
-	o.opts.OnGlobals(c)
+	o.opts.OnConfig(c)
 	if err := o.apply(c); err != nil {
 		// Stop chegou durante a gravação: gravado, mas não aplicado agora.
 		return &ipc.Error{Code: ipc.CodeInternal,
@@ -258,7 +258,7 @@ func (o *Orchestrator) ReloadFromDisk() error {
 	o.diskInvalid = nil
 	o.mu.Unlock()
 	o.opts.Log.Info("config.json recarregado")
-	o.opts.OnGlobals(c)
+	o.opts.OnConfig(c)
 	if err := o.apply(c); err != nil {
 		return nil // Stop chegou durante a recarga
 	}

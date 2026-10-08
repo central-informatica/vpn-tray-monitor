@@ -41,8 +41,10 @@ type Options struct {
 	Log     *slog.Logger
 	Events  logging.EventSink
 	Rand    func() float64
-	// OnGlobals aplica logLevel e limites de log quando a config muda.
-	OnGlobals func(config.Config)
+	// OnConfig aplica o que vale para o processo todo (logLevel, limites de
+	// log, entradas monitoradas da sonda de rede) quando a config muda;
+	// chamado antes de aplicar a config nova aos supervisores.
+	OnConfig func(config.Config)
 	// ReadFile lê config.json (recarga e conferência antes de gravar); nil =
 	// os.ReadFile.
 	ReadFile func(string) ([]byte, error)
@@ -155,8 +157,8 @@ func New(opts Options, cfg config.Config, st config.State) *Orchestrator {
 	if opts.StopTimeout == 0 {
 		opts.StopTimeout = 7 * time.Second
 	}
-	if opts.OnGlobals == nil {
-		opts.OnGlobals = func(config.Config) {}
+	if opts.OnConfig == nil {
+		opts.OnConfig = func(config.Config) {}
 	}
 	pauses := make(map[string]config.Pause, len(st.Pauses))
 	for k, p := range st.Pauses {

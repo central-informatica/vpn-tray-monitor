@@ -162,9 +162,19 @@ func TestCheckLocalDoesNotDial(t *testing.T) {
 		t.Fatalf("caído: %d %q %q", code, te.out, te.errb)
 	}
 	nw.SetPhysical(false)
-	if code := te.run("check", "Matriz"); code != 1 || !strings.Contains(te.out.String(), "sem rede física") {
+	if code := te.run("check", "Matriz"); code != 1 || !strings.Contains(te.out.String(), "sem rede com rota padrão") {
 		t.Fatalf("sem rede: %d %q", code, te.out)
 	}
+	// Outra VPN da config discada (PPP) não é rede; um PPPoE é.
+	nw.SetPPP("vpn filial")
+	if code := te.run("check", "Matriz"); code != 1 || !strings.Contains(te.out.String(), "sem rede com rota padrão") {
+		t.Fatalf("VPN monitorada contou como rede: %d %q", code, te.out)
+	}
+	nw.SetPPP("Banda Larga")
+	if code := te.run("check", "Matriz"); code != 1 || !strings.Contains(te.out.String(), "enlace caído") {
+		t.Fatalf("PPPoE deve contar como rede: %d %q", code, te.out)
+	}
+	nw.SetPPP()
 	nw.SetPhysical(true)
 	r.SetActive("VPN Matriz")
 	if code := te.run("check", "Matriz"); code != 1 || !strings.Contains(te.out.String(), "sem resposta") {
