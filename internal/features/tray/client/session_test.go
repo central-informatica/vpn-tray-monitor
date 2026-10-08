@@ -211,3 +211,22 @@ func TestSessionBusy(t *testing.T) {
 		t.Fatalf("esperava busy: %v", err)
 	}
 }
+
+// Se emit desiste depois de ready ter publicado a sessão, done() precisa fechar.
+func TestSessionEmitRefusesAfterReadyClosesDone(t *testing.T) {
+	srv := startServer(t, newBackend())
+	conn, err := net.Dial("tcp", srv.addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var pub *session
+	_, err = openSession(conn, "x", time.Second, func(Event) bool { return false }, func(s *session) { pub = s }, &counters{})
+	if err == nil || pub == nil {
+		t.Fatalf("esperava erro com sessão publicada: %v %v", err, pub)
+	}
+	select {
+	case <-pub.done():
+	case <-time.After(time.Second):
+		t.Fatal("done() não fechou")
+	}
+}

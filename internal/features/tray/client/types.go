@@ -80,7 +80,9 @@ var ErrNotConnected = errors.New("sem conexão com o serviço VPN Monitor")
 // Stats conta o que a decodificação tolerante deixou passar (serviço mais
 // novo que a bandeja): eventos de tipo desconhecido ou ilegíveis, que são
 // descartados, e mensagens com campos que esta bandeja não conhece, que são
-// aproveitadas sem eles. Aparece em "Sobre" (a bandeja não grava log).
+// aproveitadas sem eles. Só o PAYLOAD é tolerante; o envelope (ipc.Decode) é
+// estrito e uma linha inválida derruba a sessão, sem entrar nestas contagens
+// (a bandeja reconecta). Aparece em "Sobre" (a bandeja não grava log).
 type Stats struct {
 	DroppedEvents int64
 	UnknownFields int64

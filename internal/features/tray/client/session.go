@@ -27,8 +27,10 @@ type session struct {
 	next     int
 	pending  map[string]chan ipc.Message
 	finished chan struct{}
-	isStop   bool
-	once     sync.Once
+	// readerDone fecha quando o leitor termina (nada mais é emitido).
+	readerDone chan struct{}
+	isStop     bool
+	once       sync.Once
 }
 
 // openSession troca o hello (prazo timeout), chama ready (quem chama passa
@@ -37,7 +39,7 @@ type session struct {
 // (incompatible, busy…); a conexão é fechada em qualquer erro.
 func openSession(conn net.Conn, appVersion string, timeout time.Duration, emit func(Event) bool, ready func(*session), cnt *counters) (*session, error) {
 	s := &session{conn: conn, codec: ipc.NewCodec(conn), emit: emit, cnt: cnt, writeTimeout: timeout,
-		pending: map[string]chan ipc.Message{}, finished: make(chan struct{})}
+		pending: map[string]chan ipc.Message{}, finished: make(chan struct{}), readerDone: make(chan struct{})}
 	serverApp, err := s.hello(appVersion, timeout)
 	if err != nil {
 		conn.Close()
@@ -45,14 +47,15 @@ func openSession(conn net.Conn, appVersion string, timeout time.Duration, emit f
 	}
 	ready(s)
 	if !emit(Event{Kind: EvConn, Conn: Conn{State: Connected, ServerVersion: serverApp}}) {
-		conn.Close()
+		s.close() // a sessão já foi publicada por ready: done() precisa fechar
 		return nil, context.Canceled
 	}
-	go s.reader()
+	go func() { defer close(s.readerDone); s.reader() }()
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	if err := s.call(ctx, ipc.TypeSubscribe, nil, nil); err != nil {
 		s.close()
+		s.wait() // o leitor não emite depois que openSession devolve erro
 		return nil, fmt.Errorf("inscrição nos eventos: %w", err)
 	}
 	return s, nil
@@ -154,7 +157,9 @@ func (s *session) event(m ipc.Message) (Event, bool) {
 	return ev, true
 }
 
-// decode é tolerante: tenta o estrito do protocolo e, se só sobrarem campos
+// decode é tolerante só quanto ao PAYLOAD: o envelope (ipc.Decode, no codec)
+// é estrito, e uma linha inválida derruba a sessão (a bandeja reconecta).
+// Tenta o estrito do protocolo e, se só sobrarem campos
 // desconhecidos (serviço mais novo), aproveita a mensagem sem eles e conta.
 // Erro só se nem a leitura tolerante der certo.
 func (s *session) decode(raw json.RawMessage, out any) error {
@@ -241,3 +246,6 @@ func (s *session) stopping() bool {
 	defer s.mu.Unlock()
 	return s.isStop
 }
+
+// wait espera o leitor terminar; depois disso a sessão não emite mais.
+func (s *session) wait() { <-s.readerDone }
