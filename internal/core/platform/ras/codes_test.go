@@ -19,7 +19,7 @@ func TestClassifyTable(t *testing.T) {
 		{647, ERROR_ACCT_DISABLED, ClassCredencial},
 		{648, ERROR_PASSWD_EXPIRED, ClassCredencial},
 		{649, ERROR_NO_DIALIN_PERMISSION, ClassCredencial},
-		{812, ERROR_AUTH_PROTOCOL_RESTRICTED, ClassCredencial},
+		{812, ERROR_SERVER_POLICY, ClassCredencial},
 		{623, ERROR_CANNOT_FIND_PHONEBOOK_ENTRY, ClassConfiguracao},
 		{703, ERROR_INTERACTIVE_MODE, ClassConfiguracao},
 		{720, ERROR_PPP_NO_PROTOCOLS_CONFIGURED, ClassConfiguracao},

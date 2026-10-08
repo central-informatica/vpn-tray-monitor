@@ -102,7 +102,7 @@ func putUTF16(buf []byte, off, maxChars int, s string) error {
 
 func getUTF16(buf []byte, off, maxChars int) string {
 	u := make([]uint16, 0, maxChars)
-	for i := 0; i <= maxChars; i++ {
+	for i := 0; i <= maxChars && off+i*2+2 <= len(buf); i++ {
 		c := binary.LittleEndian.Uint16(buf[off+i*2:])
 		if c == 0 {
 			break
@@ -159,7 +159,12 @@ func NewConnStatusBuffer(size uint32) []byte {
 }
 
 // DecodeConnStatus lê o buffer preenchido por RasGetConnectStatusW.
+// Buffer menor que o cabeçalho (estado e erro) devolve ConnStatus zerado;
+// cadeias que ultrapassam o buffer são lidas só até onde ele alcança.
 func DecodeConnStatus(b []byte) ConnStatus {
+	if len(b) < csOffDeviceType {
+		return ConnStatus{}
+	}
 	return ConnStatus{
 		State:      binary.LittleEndian.Uint32(b[csOffState:]),
 		Error:      binary.LittleEndian.Uint32(b[csOffError:]),
@@ -182,8 +187,14 @@ func NewConnArray(size uint32, n int) []byte {
 	return b
 }
 
-// DecodeConns lê count elementos de tamanho size.
+// DecodeConns lê count elementos de tamanho size. O número de elementos é
+// limitado ao que cabe em b; size menor que o prefixo do elemento ou count
+// não positivo devolvem vazio. Nunca entra em panic.
 func DecodeConns(b []byte, size uint32, count int) []RasConn {
+	if size < cnOffEntryName || count <= 0 {
+		return nil
+	}
+	count = min(count, len(b)/int(size))
 	out := make([]RasConn, 0, count)
 	for i := 0; i < count; i++ {
 		e := b[i*int(size):]

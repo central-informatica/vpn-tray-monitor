@@ -23,7 +23,7 @@ const (
 	ERROR_DIAL_ALREADY_IN_PROGRESS      = 756
 	ERROR_AUTOMATIC_VPN_FAILED          = 800
 	ERROR_VPN_TIMEOUT                   = 809
-	ERROR_AUTH_PROTOCOL_RESTRICTED      = 812
+	ERROR_SERVER_POLICY                 = 812
 	ERROR_DNSNAME_NOT_RESOLVABLE        = 868
 	ERROR_IPSEC_IKE_AUTH_FAIL           = 13801
 	ERROR_IPSEC_IKE_NO_CERT             = 13806
@@ -62,7 +62,7 @@ var classes = map[uint32]Class{
 	ERROR_ACCT_DISABLED:                 ClassCredencial,
 	ERROR_PASSWD_EXPIRED:                ClassCredencial,
 	ERROR_NO_DIALIN_PERMISSION:          ClassCredencial,
-	ERROR_AUTH_PROTOCOL_RESTRICTED:      ClassCredencial,
+	ERROR_SERVER_POLICY:                 ClassCredencial,
 	ERROR_CANNOT_FIND_PHONEBOOK_ENTRY:   ClassConfiguracao,
 	ERROR_INTERACTIVE_MODE:              ClassConfiguracao,
 	ERROR_PPP_NO_PROTOCOLS_CONFIGURED:   ClassConfiguracao,

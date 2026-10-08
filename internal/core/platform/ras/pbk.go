@@ -1,7 +1,6 @@
 package ras
 
 import (
-	"bufio"
 	"bytes"
 	"strings"
 	"unicode/utf16"
@@ -10,21 +9,24 @@ import (
 
 // ParsePhonebook extrai os nomes de entrada de um rasphone.pbk (INI: cada
 // seção [Nome] é uma entrada). O Windows grava ora em ANSI/UTF-8, ora em
-// UTF-16LE com BOM; os dois são aceitos. Nomes repetidos aparecem uma vez.
+// UTF-16LE com BOM; os dois são aceitos. UTF-16 LE e BE (com BOM) são aceitos. Nomes repetidos (sem distinguir
+// maiúsculas) aparecem uma vez, com a grafia da primeira ocorrência.
 func ParsePhonebook(raw []byte) []string {
 	text := decodePhonebook(raw)
 	var names []string
 	seen := map[string]bool{}
-	sc := bufio.NewScanner(strings.NewReader(text))
-	sc.Buffer(make([]byte, 0, 64*1024), 1024*1024)
-	for sc.Scan() {
-		line := strings.TrimSpace(sc.Text())
+	// Divisão própria (sem bufio.Scanner, que tem limite de linha): aceita
+	// \r\n, \r sozinho e \n como fim de linha.
+	lines := strings.FieldsFunc(text, func(r rune) bool { return r == '\r' || r == '\n' })
+	for _, l := range lines {
+		line := strings.TrimSpace(l)
 		if len(line) < 3 || line[0] != '[' || line[len(line)-1] != ']' {
 			continue
 		}
 		name := strings.TrimSpace(line[1 : len(line)-1])
-		if name != "" && !seen[name] {
-			seen[name] = true
+		key := strings.ToLower(name)
+		if name != "" && !seen[key] {
+			seen[key] = true
 			names = append(names, name)
 		}
 	}
@@ -32,7 +34,8 @@ func ParsePhonebook(raw []byte) []string {
 }
 
 func decodePhonebook(raw []byte) string {
-	if !bytes.HasPrefix(raw, []byte{0xFF, 0xFE}) {
+	bigEndian := bytes.HasPrefix(raw, []byte{0xFE, 0xFF})
+	if !bigEndian && !bytes.HasPrefix(raw, []byte{0xFF, 0xFE}) {
 		raw = bytes.TrimPrefix(raw, []byte("\xEF\xBB\xBF"))
 		if utf8.Valid(raw) {
 			return string(raw)
@@ -42,7 +45,11 @@ func decodePhonebook(raw []byte) string {
 	body := raw[2:]
 	u := make([]uint16, 0, len(body)/2)
 	for i := 0; i+1 < len(body); i += 2 {
-		u = append(u, uint16(body[i])|uint16(body[i+1])<<8)
+		if bigEndian {
+			u = append(u, uint16(body[i])<<8|uint16(body[i+1]))
+		} else {
+			u = append(u, uint16(body[i])|uint16(body[i+1])<<8)
+		}
 	}
 	return string(utf16.Decode(u))
 }

@@ -125,3 +125,28 @@ func TestDecodeConns(t *testing.T) {
 		t.Fatalf("%+v", got)
 	}
 }
+
+func TestDecodersShortBuffersDoNotPanic(t *testing.T) {
+	for _, n := range []int{0, 3, 11, 12, 30, 100, 563} {
+		_ = DecodeConnStatus(make([]byte, n))
+	}
+	b := NewConnArray(1388, 2)
+	EncodeConnForTest(b, 1388, 0, 0x1234, "Matriz")
+	if got := DecodeConns(b[:1388+10], 1388, 2); len(got) != 1 || got[0].Entry != "Matriz" {
+		t.Fatalf("deveria limitar ao que cabe: %+v", got)
+	}
+	if got := DecodeConns(b, 1388, 5); len(got) != 2 {
+		t.Fatalf("count acima do buffer: %d", len(got))
+	}
+	for _, c := range []struct {
+		size  uint32
+		count int
+	}{{0, 3}, {4, 3}, {1388, 0}, {1388, -1}} {
+		if got := DecodeConns(b, c.size, c.count); len(got) != 0 {
+			t.Fatalf("%+v: %+v", c, got)
+		}
+	}
+	if got := DecodeConns(nil, 1388, 1); len(got) != 0 {
+		t.Fatal("buffer nil")
+	}
+}
