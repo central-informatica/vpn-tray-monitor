@@ -1,8 +1,6 @@
 package service
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -15,11 +13,6 @@ import (
 )
 
 var _ ipc.Backend = (*Orchestrator)(nil)
-
-func hashBytes(b []byte) string {
-	sum := sha256.Sum256(b)
-	return hex.EncodeToString(sum[:])
-}
 
 func invalid(probs []config.FieldError) error {
 	msgs := make([]string, len(probs))
@@ -61,7 +54,7 @@ func (o *Orchestrator) mutate(f func(c *config.Config) error) error {
 	// assentar) seria apagada pela gravação: recusa até a recarga.
 	if cur, err := o.opts.ReadFile(o.opts.Paths.ConfigFile); err == nil {
 		o.mu.Lock()
-		changed := hashBytes(cur) != o.lastWritten
+		changed := config.ContentHash(cur) != o.lastWritten
 		o.mu.Unlock()
 		if changed {
 			return &ipc.Error{Code: ipc.CodeInvalidConfig,
@@ -75,7 +68,7 @@ func (o *Orchestrator) mutate(f func(c *config.Config) error) error {
 		return &ipc.Error{Code: ipc.CodeInternal, Message: "gravando config.json: " + err.Error()}
 	}
 	o.mu.Lock()
-	o.lastWritten = hashBytes(data)
+	o.lastWritten = config.ContentHash(data)
 	o.mu.Unlock()
 	o.opts.OnGlobals(c)
 	if err := o.apply(c); err != nil {
@@ -231,7 +224,7 @@ func (o *Orchestrator) ReloadFromDisk() error {
 	if err != nil {
 		return fmt.Errorf("lendo config.json: %w", err)
 	}
-	h := hashBytes(data)
+	h := config.ContentHash(data)
 	o.mu.Lock()
 	same := h == o.lastWritten && o.diskInvalid == nil
 	wasUnreadable := o.unreadable
@@ -298,7 +291,7 @@ func (o *Orchestrator) ConfigUnreadable(err error) {
 func (o *Orchestrator) MarkWritten(data []byte) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
-	o.lastWritten = hashBytes(data)
+	o.lastWritten = config.ContentHash(data)
 }
 
 // MarkDiskInvalid registra que o config.json em disco está inválido (na

@@ -146,3 +146,11 @@ func TestSaveRoundTripAndRefusesInvalid(t *testing.T) {
 }
 
 var t0 = mustTime("2026-10-07T12:00:00Z")
+
+func TestContentHash(t *testing.T) {
+	// SHA-256 de "" e de "abc" (vetores conhecidos).
+	if ContentHash(nil) != "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855" ||
+		ContentHash([]byte("abc")) != "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad" {
+		t.Fatal("hash inesperado")
+	}
+}

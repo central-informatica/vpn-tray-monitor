@@ -4,6 +4,8 @@ package config
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -12,6 +14,13 @@ import (
 
 	"github.com/guibsu/vpn-tray-monitor/internal/shared"
 )
+
+// ContentHash é o SHA-256 (hex) dos bytes de config.json: identifica a
+// própria gravação do serviço e detecta edição manual.
+func ContentHash(b []byte) string {
+	sum := sha256.Sum256(b)
+	return hex.EncodeToString(sum[:])
+}
 
 // Version é a única versão de config aceita.
 const Version = 2

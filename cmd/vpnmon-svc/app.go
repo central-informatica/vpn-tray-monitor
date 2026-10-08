@@ -2,8 +2,6 @@ package main
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -58,11 +56,6 @@ func (b credBridge) Fingerprint(ctx context.Context, name, entry string) string 
 	return b.r.Fingerprint(ctx, name, entry)
 }
 
-func hashOf(b []byte) string {
-	sum := sha256.Sum256(b)
-	return hex.EncodeToString(sum[:])
-}
-
 // fileHash é a impressão digital de um arquivo para o PollWatcher ("" se
 // ilegível ou ausente).
 func fileHash(read func(string) ([]byte, error), path string) func() string {
@@ -71,7 +64,7 @@ func fileHash(read func(string) ([]byte, error), path string) func() string {
 		if err != nil {
 			return ""
 		}
-		return hashOf(b)
+		return config.ContentHash(b)
 	}
 }
 
@@ -341,7 +334,7 @@ func serve(ctx context.Context, p Platform, l layout, clock shared.Clock, ready 
 			return
 		case <-baseline:
 		}
-		if cfgProbe() != hashOf(cfgData) {
+		if cfgProbe() != config.ContentHash(cfgData) {
 			reload()
 		}
 		for {
