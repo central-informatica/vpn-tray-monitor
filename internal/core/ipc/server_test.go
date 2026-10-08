@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"errors"
+	"io"
 	"net"
 	"strings"
 	"sync"
@@ -557,5 +558,30 @@ func TestBusyReplyReadsClientHelloBeforeClosing(t *testing.T) {
 	var e *Error
 	if _, err := Handshake(ln.dial(t), "x"); !errors.As(err, &e) || e.Code != CodeBusy {
 		t.Fatalf("cliente deve receber busy mesmo mandando hello antes de ler: %v", err)
+	}
+}
+
+// Linha grande demais com muito mais dados em seguida: o servidor drena antes
+// de fechar, então o cliente lê o bad_request e o EOF limpo, sem RST.
+func TestServerBadRequestDrainsBeforeClose(t *testing.T) {
+	addr, _, _ := startServer(t, &fakeBackend{}, nil)
+	hello := `{"v":1,"id":"1","type":"hello","payload":{"protocol":1,"appVersion":"x"}}` + "\n"
+	c, r := rawConn(t, addr)
+	c.Write([]byte(hello))
+	r.ReadString('\n')
+	writeDone := make(chan struct{})
+	go func() {
+		defer close(writeDone)
+		c.Write([]byte(strings.Repeat("a", 2*MaxMessage)))
+	}()
+	line, err := r.ReadString('\n')
+	if err != nil || !strings.Contains(line, `"code":"`+CodeBadRequest+`"`) {
+		t.Fatalf("esperava bad_request, veio %q %v", line, err)
+	}
+	<-writeDone
+	// Fechamos a escrita: o servidor termina a drenagem e fecha com EOF.
+	c.(*net.TCPConn).CloseWrite()
+	if _, err := r.ReadString('\n'); !errors.Is(err, io.EOF) {
+		t.Fatalf("esperava EOF limpo, veio %v", err)
 	}
 }

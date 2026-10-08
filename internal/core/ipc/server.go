@@ -276,7 +276,7 @@ func (s *Server) handle(ctx context.Context, c net.Conn) {
 		var de *DecodeError
 		if errors.Is(err, ErrTooLarge) || errors.As(err, &de) {
 			cn.send(ErrorMessage("", &Error{Code: CodeBadRequest, Message: "esperava hello: " + err.Error()}))
-			cn.flush()
+			cn.flushAndDrain()
 		}
 		return
 	}
@@ -306,7 +306,7 @@ func (s *Server) handle(ctx context.Context, c net.Conn) {
 			var de *DecodeError
 			if errors.Is(err, ErrTooLarge) || errors.As(err, &de) {
 				cn.send(ErrorMessage("", &Error{Code: CodeBadRequest, Message: err.Error()}))
-				cn.flush()
+				cn.flushAndDrain()
 			}
 			return
 		}
@@ -385,6 +385,16 @@ func (cn *conn) flush() {
 		case <-tick.C:
 		}
 	}
+}
+
+// flushAndDrain espera a resposta final sair e então lê e descarta o que o
+// cliente ainda mandar, até EOF ou refuseLinger, antes de o chamador fechar:
+// fechar TCP com dados não lidos manda RST e pode apagar a resposta no
+// cliente (mesma razão de replyAndClose). Só vale para o último envio.
+func (cn *conn) flushAndDrain() {
+	cn.flush()
+	_ = cn.c.SetReadDeadline(time.Now().Add(refuseLinger))
+	_, _ = io.Copy(io.Discard, io.LimitReader(cn.c, 4*MaxMessage))
 }
 
 func (s *Server) dispatch(m Message) (resp Message) {
