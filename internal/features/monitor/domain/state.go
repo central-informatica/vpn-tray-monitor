@@ -191,22 +191,47 @@ func Restart(last Status, p Params, now time.Time, pause config.Pause) Status {
 }
 
 // Reconfigure é o estado ao recriar o supervisor porque a config da VPN mudou
-// sem trocar a entrada RAS (verificação ou limites). Parte de Restart (guarda a
-// memória de bloqueio, as reconexões, WasUp/DownSince e o backoff), mas o que
-// foi medido com a config antiga deixa de valer: Failures e LastRTT zeram e
-// Degradada volta a Desconhecido. Se o intervalo ou o teto do backoff
-// mudaram, NextAttempt (calculado com os limites antigos) é limpo.
+// (old → p). Parte de Restart (guarda a memória de bloqueio, as reconexões,
+// WasUp/DownSince e o backoff), mas o que foi medido com a config antiga deixa
+// de valer: Failures e LastRTT zeram e Degradada volta a Desconhecido. Com
+// intervalo ou teto do backoff novos, o prazo pendente não passa de now+teto.
+//
+// Com a entrada RAS trocada, o enlace, o alcance e o backoff eram da entrada
+// antiga e zeram (estado volta a Desconhecido, e um ErroConfig dela sai do
+// bloqueio), mas a memória de credencial rejeitada fica: o cofre é por nome
+// de VPN, e a mesma credencial seria discada de novo.
 func Reconfigure(last Status, old, p Params, now time.Time, pause config.Pause) Status {
 	s := Restart(last, p, now, pause)
 	if !p.Enabled {
 		return s
 	}
+	set := func(st State) {
+		if s.State != st {
+			s.State, s.Since = st, now
+		}
+	}
 	s.Failures, s.LastRTT = 0, 0
 	if s.State == Degradada {
-		s.State, s.Since = Desconhecido, now
+		set(Desconhecido)
 	}
 	if old.Interval != p.Interval || old.MaxBackoff != p.MaxBackoff {
-		s.NextAttempt = time.Time{}
+		if limit := now.Add(p.MaxBackoff); !s.NextAttempt.IsZero() && s.NextAttempt.After(limit) {
+			s.NextAttempt = limit
+		}
+	}
+	if old.Entry != p.Entry {
+		s.Attempt, s.NextAttempt, s.GraceUntil, s.LastCheck = 0, time.Time{}, time.Time{}, time.Time{}
+		if s.Blocked == ErroConfig {
+			s.Blocked = ""
+		}
+		switch s.State {
+		case ErroConfig, Conectada, Reconectando, Desconectada, SemRede:
+			set(Desconhecido)
+			s.NextTick = now
+		}
+		if s.State != CredencialInvalida && s.Blocked != CredencialInvalida {
+			s.LastErr = nil
+		}
 	}
 	return s
 }

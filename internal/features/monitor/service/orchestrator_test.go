@@ -53,7 +53,8 @@ func newOrchWith(t *testing.T, w *stubWorld, cfg config.Config, st config.State,
 		paths: Paths{ConfigFile: filepath.Join(dir, "config.json"), StateFile: filepath.Join(dir, "state.json"),
 			LogFile: filepath.Join(dir, "vpnmon.log")},
 		ras: fake.NewRAS("VPN Matriz", "VPN Filial", "VPN Backup")}
-	if _, err := config.Save(h.paths.ConfigFile, cfg); err != nil {
+	saved, err := config.Save(h.paths.ConfigFile, cfg)
+	if err != nil {
 		t.Fatal(err)
 	}
 	h.pinger = fake.NewPinger()
@@ -66,6 +67,7 @@ func newOrchWith(t *testing.T, w *stubWorld, cfg config.Config, st config.State,
 		tweak(&opts)
 	}
 	h.o = New(opts, cfg, st)
+	h.o.MarkWritten(saved) // como a montagem faz após carregar na partida
 	ctx, cancel := context.WithCancel(context.Background())
 	h.cancel = cancel
 	h.o.Start(ctx)

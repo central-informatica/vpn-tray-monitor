@@ -100,9 +100,16 @@ func TestReloadFromDisk(t *testing.T) {
 	// Gravação própria (mutate) não recarrega: o hash bate.
 	_ = h.o.SetEnabled("Matriz", true)
 	sup := h.supOf("Matriz")
+	for range drain(events) { // snapshot e configStatus da própria mutação
+	}
 	h.o.ReloadFromDisk()
 	if h.supOf("Matriz") != sup {
 		t.Fatal("a própria gravação não deve recarregar")
+	}
+	for m := range drain(events) {
+		if m.Type == ipc.TypeSnapshot || m.Type == ipc.TypeConfigStatus {
+			t.Fatalf("recarga da própria gravação publicou %s", m.Type)
+		}
 	}
 
 	// Edição manual inválida: mantém a anterior e publica configStatus.
@@ -208,16 +215,22 @@ func TestConfigOpsAfterStop(t *testing.T) {
 
 // (a) Mudar só os limites com a mesma entrada RAS: o prazo de backoff
 // calculado com os limites antigos não segura a discagem.
-func TestUpdateVPNWithNewBackoffClearsNextAttempt(t *testing.T) {
+func TestUpdateVPNWithLowerBackoffCapsNextAttempt(t *testing.T) {
 	w := &stubWorld{network: true, outcomes: []adapters.DialOutcome{{Err: &domain.DialError{Code: 809}}}}
 	h := newOrch(t, w, cfgWith(vpnNamed("Matriz")), config.State{})
-	h.waitViewWhere("Matriz", func(v ipc.VPNView) bool { return v.NextAttemptUnix != 0 })
-	err := h.o.UpdateVPN("Matriz", config.RawVPN{RasEntry: "VPN Matriz", MaxBackoffSeconds: intp(600),
+	h.waitViewWhere("Matriz", func(v ipc.VPNView) bool { return v.NextAttemptUnix == t0.Add(30*time.Second).Unix() })
+	err := h.o.UpdateVPN("Matriz", config.RawVPN{RasEntry: "VPN Matriz", IntervalSeconds: intp(5), MaxBackoffSeconds: intp(5),
 		Check: &config.RawCheck{Kind: config.CheckPing, Host: "10.0.0.1"}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	h.waitView("Matriz", domain.Conectada) // sem avançar o relógio
+	// O prazo calculado com o teto antigo (30 s) cai para o teto novo (5 s).
+	h.waitViewWhere("Matriz", func(v ipc.VPNView) bool { return v.NextAttemptUnix == t0.Add(5*time.Second).Unix() })
+	if n := len(w.get().dials); n != 1 {
+		t.Fatalf("não pode discar antes do prazo: %d discagens", n)
+	}
+	h.clk.Advance(5 * time.Second)
+	h.waitView("Matriz", domain.Conectada)
 	if n := len(w.get().dials); n != 2 {
 		t.Fatalf("discagens = %d", n)
 	}
@@ -311,5 +324,81 @@ func TestReconnectAfterTripInCredentialBlockIsRejected(t *testing.T) {
 	}
 	if n := len(w.get().dials); n != 1 {
 		t.Fatalf("discagens = %d", n)
+	}
+}
+
+// O cofre é por nome de VPN: trocar a entrada RAS de uma VPN bloqueada por
+// credencial não libera uma nova discagem com a mesma credencial.
+func TestUpdateVPNNewEntryKeepsCredentialBlock(t *testing.T) {
+	w := &stubWorld{network: true, outcomes: rejected()}
+	h := newOrch(t, w, cfgWith(vpnNamed("Matriz")), config.State{})
+	h.waitView("Matriz", domain.CredencialInvalida)
+	err := h.o.UpdateVPN("Matriz", config.RawVPN{RasEntry: "VPN Backup",
+		Check: &config.RawCheck{Kind: config.CheckPing, Host: "10.0.0.1"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.waitViewWhere("Matriz", func(v ipc.VPNView) bool {
+		return v.State == string(domain.CredencialInvalida) && v.Entry == "VPN Backup"
+	})
+	for range 30 {
+		h.clk.Advance(time.Minute)
+	}
+	time.Sleep(50 * time.Millisecond)
+	if n := len(w.get().dials); n != 1 {
+		t.Fatalf("troca de entrada discou com a credencial rejeitada: %d discagens", n)
+	}
+}
+
+func TestUpdateVPNKeepsEnabledWhenOmitted(t *testing.T) {
+	w := &stubWorld{up: true, network: true}
+	h := newOrch(t, w, cfgWith(vpnNamed("Matriz")), config.State{})
+	if err := h.o.SetEnabled("Matriz", false); err != nil {
+		t.Fatal(err)
+	}
+	err := h.o.UpdateVPN("Matriz", config.RawVPN{RasEntry: "VPN Matriz", IntervalSeconds: intp(60),
+		Check: &config.RawCheck{Kind: config.CheckPing, Host: "10.0.0.1"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c := h.o.GetConfig(); c.VPNs[0].Enabled || c.VPNs[0].IntervalSeconds != 60 {
+		t.Fatalf("Enabled omitido deveria ficar como estava: %+v", c.VPNs[0])
+	}
+	on := true
+	if err := h.o.UpdateVPN("Matriz", config.RawVPN{RasEntry: "VPN Matriz", Enabled: &on,
+		Check: &config.RawCheck{Kind: config.CheckPing, Host: "10.0.0.1"}}); err != nil {
+		t.Fatal(err)
+	}
+	if !h.o.GetConfig().VPNs[0].Enabled {
+		t.Fatal("Enabled explícito deveria valer")
+	}
+}
+
+// Edição manual ainda não recarregada (dentro da espera do observador): a
+// mudança pelo pipe é recusada e o arquivo fica intacto.
+func TestMutateRefusesUnreloadedManualEdit(t *testing.T) {
+	w := &stubWorld{up: true, network: true}
+	h := newOrch(t, w, cfgWith(vpnNamed("Matriz")), config.State{})
+	manual, _ := config.Marshal(cfgWith(vpnNamed("Matriz"), vpnNamed("Filial")))
+	_ = os.WriteFile(h.paths.ConfigFile, manual, 0o600)
+	var e *ipc.Error
+	err := h.o.SetEnabled("Matriz", false)
+	if !asIPC(err, &e) || e.Code != ipc.CodeInvalidConfig || !strings.Contains(e.Message, "alterado no disco") {
+		t.Fatalf("mudança com edição pendente: %v", err)
+	}
+	if b, _ := os.ReadFile(h.paths.ConfigFile); string(b) != string(manual) {
+		t.Fatal("a edição manual foi sobrescrita")
+	}
+	h.o.ReloadFromDisk()
+	if err := h.o.SetEnabled("Matriz", false); err != nil {
+		t.Fatalf("após a recarga a mudança vale: %v", err)
+	}
+	// Sem arquivo (apagado), a mutação recria.
+	_ = os.Remove(h.paths.ConfigFile)
+	if err := h.o.SetEnabled("Matriz", true); err != nil {
+		t.Fatalf("sem arquivo: %v", err)
+	}
+	if c, err := config.Load(h.paths.ConfigFile); err != nil || len(c.VPNs) != 2 {
+		t.Fatalf("recriado: %+v %v", c, err)
 	}
 }

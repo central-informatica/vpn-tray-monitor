@@ -320,8 +320,8 @@ func (o *Orchestrator) apply(cfg config.Config) error {
 // guarda bloqueio e backoff). breakerPanics panics rápidos seguidos abrem o
 // disjuntor. prev é o supervisor anterior da mesma VPN numa recarga: com a
 // mesma entrada RAS, parte do último estado real dele (a memória de
-// credencial rejeitada não se perde; com a config mudada, por
-// domain.Reconfigure); se o disjuntor dele estava aberto, um único panic
+// credencial rejeitada não se perde; com a config mudada, inclusive a
+// entrada RAS, por domain.Reconfigure); se o disjuntor dele estava aberto, um único panic
 // rápido o reabre. Chamar com o.mu travado.
 func (o *Orchestrator) launch(v config.VPN, prev *running) *running {
 	ctx, cancel := context.WithCancel(o.ctx)
@@ -334,7 +334,7 @@ func (o *Orchestrator) launch(v config.VPN, prev *running) *running {
 	switch {
 	case prev != nil && prev.vpn == v: // só reabre o disjuntor
 		r.last = domain.Restart(prev.base, params, now, o.state.Pauses[key])
-	case prev != nil && prev.vpn.RasEntry == v.RasEntry:
+	case prev != nil: // config mudou (até a entrada RAS: a credencial é por nome)
 		r.last = domain.Reconfigure(prev.base, domain.ParamsFrom(prev.vpn), params, now, o.state.Pauses[key])
 	default:
 		r.last = domain.Initial(params, now, o.state.Pauses[key])

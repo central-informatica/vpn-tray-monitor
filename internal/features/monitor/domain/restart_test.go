@@ -113,19 +113,26 @@ func TestReconfigureSameEntryKeepsOnlyBlockMemory(t *testing.T) {
 	}
 	assertMemory(t, s, last) // bloqueio, reconexões, WasUp/DownSince e backoff ficam
 
-	// Backoff alterado: a próxima discagem não espera o prazo calculado
-	// com os limites antigos.
+	// Teto do backoff menor: a próxima discagem não espera mais que ele.
 	p = params()
-	p.MaxBackoff = 10 * time.Minute
+	p.Interval, p.MaxBackoff = 5*time.Second, 30*time.Second
 	s = Reconfigure(lived(Reconectando), params(), p, t0, config.Pause{})
-	if !s.NextAttempt.IsZero() || s.State != Reconectando || s.BlockedFP != "fp-velha" {
-		t.Fatalf("backoff novo deveria limpar NextAttempt: %+v", s)
+	if !s.NextAttempt.Equal(t0.Add(30*time.Second)) || s.State != Reconectando || s.BlockedFP != "fp-velha" {
+		t.Fatalf("NextAttempt deveria cair para o teto novo: %+v", s)
+	}
+	// Teto maior: o prazo já calculado (menor) fica.
+	p.MaxBackoff = 10 * time.Minute
+	if s = Reconfigure(lived(Reconectando), params(), p, t0, config.Pause{}); !s.NextAttempt.Equal(t0.Add(2 * time.Minute)) {
+		t.Fatalf("teto maior não deveria adiar: %+v", s)
+	}
+	// Sem prazo pendente, continua sem prazo.
+	none := lived(Reconectando)
+	none.NextAttempt = time.Time{}
+	if s = Reconfigure(none, params(), p, t0, config.Pause{}); !s.NextAttempt.IsZero() {
+		t.Fatalf("NextAttempt zero deveria ficar zero: %+v", s)
 	}
 	p = params()
 	p.Interval = time.Minute
-	if s = Reconfigure(lived(Reconectando), params(), p, t0, config.Pause{}); !s.NextAttempt.IsZero() {
-		t.Fatalf("intervalo novo deveria limpar NextAttempt: %+v", s)
-	}
 
 	// Bloqueio por credencial continua bloqueio, sem tique.
 	b := lived(CredencialInvalida)
@@ -142,5 +149,34 @@ func TestOpString(t *testing.T) {
 		if got := op.String(); got != want {
 			t.Errorf("%d: %q", int(op), got)
 		}
+	}
+}
+
+func TestReconfigureNewEntry(t *testing.T) {
+	p := params()
+	p.Entry = "VPN Nova"
+	// Credencial rejeitada: o cofre é por nome de VPN, o bloqueio fica.
+	b := lived(CredencialInvalida)
+	b.Op = OpNone
+	b.Blocked = CredencialInvalida
+	s := Reconfigure(b, params(), p, t0, config.Pause{})
+	if s.State != CredencialInvalida || s.BlockedFP != "fp-velha" || !s.RejectedAt.Equal(b.RejectedAt) ||
+		!s.LastManualTry.Equal(b.LastManualTry) || !s.NextTick.IsZero() || s.LastErr != b.LastErr {
+		t.Fatalf("memória de credencial perdida: %+v", s)
+	}
+	// Erro de configuração era da entrada antiga: sai do bloqueio e verifica já.
+	e := lived(ErroConfig)
+	e.Blocked = ErroConfig
+	s = Reconfigure(e, params(), p, t0, config.Pause{})
+	if s.State != Desconhecido || s.Blocked != "" || s.LastErr != nil || !s.NextTick.Equal(t0) {
+		t.Fatalf("erro de configuração da entrada antiga continuou: %+v", s)
+	}
+	// Enlace e alcance da entrada antiga não valem; backoff zera.
+	c := lived(Conectada)
+	c.LastRTT = time.Millisecond
+	s = Reconfigure(c, params(), p, t0, config.Pause{})
+	if s.State != Desconhecido || s.Failures != 0 || s.LastRTT != 0 || s.Attempt != 0 ||
+		!s.NextAttempt.IsZero() || !s.LastCheck.IsZero() || s.BlockedFP != "fp-velha" || len(s.Reconnects) != 1 {
+		t.Fatalf("estado de enlace da entrada antiga: %+v", s)
 	}
 }

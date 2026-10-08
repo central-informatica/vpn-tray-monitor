@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"slices"
 	"strings"
@@ -57,6 +58,19 @@ func (o *Orchestrator) mutate(f func(c *config.Config) error) error {
 		}
 		return err
 	}
+	// Uma edição manual ainda não recarregada (o observador espera o arquivo
+	// assentar) seria apagada pela gravação: recusa até a recarga.
+	if cur, err := os.ReadFile(o.opts.Paths.ConfigFile); err == nil {
+		o.mu.Lock()
+		changed := hashBytes(cur) != o.lastWritten
+		o.mu.Unlock()
+		if changed {
+			return &ipc.Error{Code: ipc.CodeInvalidConfig,
+				Message: "config.json foi alterado no disco; aguarde a recarga e tente de novo"}
+		}
+	} else if !errors.Is(err, fs.ErrNotExist) {
+		return &ipc.Error{Code: ipc.CodeInternal, Message: "lendo config.json: " + err.Error()}
+	}
 	data, err := config.Save(o.opts.Paths.ConfigFile, c)
 	if err != nil {
 		return &ipc.Error{Code: ipc.CodeInternal, Message: "gravando config.json: " + err.Error()}
@@ -66,7 +80,9 @@ func (o *Orchestrator) mutate(f func(c *config.Config) error) error {
 	o.mu.Unlock()
 	o.opts.OnGlobals(c)
 	if err := o.apply(c); err != nil {
-		return err // Stop chegou durante a gravação: gravado, não aplicado
+		// Stop chegou durante a gravação: gravado, mas não aplicado agora.
+		return &ipc.Error{Code: ipc.CodeInternal,
+			Message: "serviço parando; a mudança foi gravada e vale na próxima partida"}
 	}
 	o.bus.publish(ipc.MustMessage("", ipc.TypeConfigStatus, ipc.ConfigStatus{OK: true}))
 	return nil
@@ -125,6 +141,10 @@ func (o *Orchestrator) UpdateVPN(name string, raw config.RawVPN) error {
 			return invalid([]config.FieldError{{Field: "name", Message: "o nome não pode ser alterado; remova e adicione de novo"}})
 		}
 		raw.Name = c.VPNs[i].Name
+		if raw.Enabled == nil { // omitido: fica como está (não volta ao padrão)
+			enabled := c.VPNs[i].Enabled
+			raw.Enabled = &enabled
+		}
 		v := raw.Normalize()
 		if probs := config.ValidateVPN(v); len(probs) > 0 {
 			return invalid(probs)
@@ -241,8 +261,11 @@ func (o *Orchestrator) ReloadFromDisk() {
 	o.bus.publish(ipc.MustMessage("", ipc.TypeConfigStatus, ipc.ConfigStatus{OK: true}))
 }
 
-// MarkWritten registra o hash do config.json gravado fora do orquestrador
-// (seed no primeiro início), para o observador não recarregá-lo à toa.
+// MarkWritten registra o hash do config.json carregado ou gravado fora do
+// orquestrador. A montagem chama a cada partida com os bytes carregados (ou
+// gravados pelo seed): o observador não o recarrega à toa e mutate só aceita
+// gravar por cima de um arquivo com esse hash (senão seria uma edição manual
+// ainda não recarregada).
 func (o *Orchestrator) MarkWritten(data []byte) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
