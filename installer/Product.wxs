@@ -126,9 +126,14 @@
                        Name="VPNMonitorTray" Type="string" Value="&quot;[#TrayExe]&quot;" />
       </Component>
 
-      <Component Id="Documentos" Bitness="always64">
+      <!-- Um arquivo por componente: texto não tem versão, e o Guid
+           automático só aceita vários arquivos com chave versionada
+           (WIX0367). -->
+      <Component Id="Licenca" Bitness="always64">
         <File Id="Licenca" Source="$(sys.SOURCEFILEDIR)LICENCA.txt" KeyPath="yes" />
-        <File Id="Leiame" Source="$(sys.SOURCEFILEDIR)..\README.md" />
+      </Component>
+      <Component Id="Leiame" Bitness="always64">
+        <File Id="Leiame" Source="$(sys.SOURCEFILEDIR)..\README.md" KeyPath="yes" />
       </Component>
 
       <!-- Origem do Event Log (§5.6): só registro, com a mesma DLL de

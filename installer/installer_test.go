@@ -280,3 +280,22 @@ func TestNoCustomActions(t *testing.T) {
 	}
 	walk(root)
 }
+
+// Um arquivo por componente, chave = o próprio arquivo: com Guid automático o
+// WiX só aceita vários arquivos se a chave for versionada e os demais não
+// (WIX0367), e LICENCA.txt/README.md não têm versão. Um por componente também
+// é a regra do Windows Installer para o GUID não mudar entre versões.
+func TestOneFilePerComponent(t *testing.T) {
+	for _, c := range load(t).all(nsWix, "Component") {
+		files := c.all(nsWix, "File")
+		if len(files) > 1 {
+			t.Errorf("componente %q tem %d arquivos, quer no máximo 1", c.attr("Id"), len(files))
+		}
+		if len(files) == 1 && files[0].attr("KeyPath") != "yes" {
+			t.Errorf("componente %q: o arquivo %q deve ser a chave", c.attr("Id"), files[0].attr("Id"))
+		}
+		if g := c.attr("Guid"); g != "" && g != "*" {
+			t.Errorf("componente %q com Guid fixo %q; quer automático", c.attr("Id"), g)
+		}
+	}
+}
