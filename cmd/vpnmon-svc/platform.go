@@ -1,0 +1,26 @@
+package main
+
+import (
+	"net"
+
+	"github.com/guibsu/vpn-tray-monitor/internal/core/config"
+	"github.com/guibsu/vpn-tray-monitor/internal/core/logging"
+	"github.com/guibsu/vpn-tray-monitor/internal/core/platform/acl"
+	"github.com/guibsu/vpn-tray-monitor/internal/core/platform/dpapi"
+	"github.com/guibsu/vpn-tray-monitor/internal/core/platform/icmp"
+	"github.com/guibsu/vpn-tray-monitor/internal/core/platform/netwatch"
+	"github.com/guibsu/vpn-tray-monitor/internal/core/platform/ras"
+)
+
+// Platform reúne o acesso ao SO usado pelo serviço; no Windows vem de
+// realPlatform, nos testes de fakes.
+type Platform struct {
+	RAS      ras.Client
+	Pinger   icmp.Pinger
+	Net      netwatch.Watcher
+	DPAPI    dpapi.Protector
+	ACL      acl.Securer
+	Listen   func() (net.Listener, error)
+	Events   logging.EventSink
+	ReadSeed config.SeedReader
+}
