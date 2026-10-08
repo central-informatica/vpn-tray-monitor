@@ -2,47 +2,44 @@ package acl
 
 import "testing"
 
-func TestDecideRoot(t *testing.T) {
-	cases := []struct {
-		name string
-		e    Entry
-		want Action
-	}{
-		{"não existe", Entry{}, ActionCreateRoot},
-		{"ok", Entry{Exists: true, IsDir: true, SDDL: DirSDDL}, ActionOK},
-		{"junção", Entry{Exists: true, IsDir: true, Reparse: true, SDDL: DirSDDL}, ActionQuarantineRoot},
-		{"é arquivo", Entry{Exists: true, SDDL: DirSDDL}, ActionQuarantineRoot},
-		{"dono usuário", Entry{Exists: true, IsDir: true, SDDL: "O:S-1-5-21-1-2-3-1001D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)"}, ActionQuarantineRoot},
-		{"sem dono lido", Entry{Exists: true, IsDir: true, SDDL: "D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)"}, ActionQuarantineRoot},
-		{"dono SYSTEM, DACL errada", Entry{Exists: true, IsDir: true, SDDL: "O:SYD:AI(A;OICI;FA;;;SY)"}, ActionApplyRoot},
-		{"dono BA, usuários lendo", Entry{Exists: true, IsDir: true, SDDL: "O:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;FR;;;BU)"}, ActionApplyRoot},
-	}
-	for _, c := range cases {
-		if got := DecideRoot(c.e); got != c.want {
-			t.Errorf("%s: %v, quer %v", c.name, got, c.want)
-		}
-	}
-}
-
-func TestDecideChild(t *testing.T) {
+func TestDecide(t *testing.T) {
 	const inherited = "O:BAD:AI(A;ID;FA;;;SY)(A;OICIID;FA;;;BA)"
+	good := func(p string) Entry { return Entry{Path: p, Exists: true, SDDL: inherited} }
+	root := Entry{Path: ".", Exists: true, IsDir: true, SDDL: DirSDDL}
+	with := func(e Entry, f func(*Entry)) Entry { f(&e); return e }
+
 	cases := []struct {
-		name string
-		e    Entry
-		want Action
+		name     string
+		root     Entry
+		children []Entry
+		want     Action
 	}{
-		{"herdado, dono BA", Entry{Exists: true, SDDL: inherited}, ActionOK},
-		{"junção", Entry{Exists: true, IsDir: true, Reparse: true, SDDL: inherited}, ActionRemoveLink},
-		{"DACL protegida", Entry{Exists: true, SDDL: "O:BAD:P(A;;FA;;;SY)(A;;FA;;;BA)"}, ActionResetChild},
-		{"ACE explícita para Todos", Entry{Exists: true, SDDL: "O:BAD:AI(A;ID;FA;;;SY)(A;;FA;;;WD)"}, ActionResetChild},
-		{"dono usuário", Entry{Exists: true, SDDL: "O:S-1-5-21-1-2-3-1001D:AI(A;ID;FA;;;SY)"}, ActionResetChild},
-		{"dono SYSTEM", Entry{Exists: true, SDDL: "O:SYD:AI(A;ID;FA;;;SY)"}, ActionResetChild},
-		{"DACL vazia", Entry{Exists: true, SDDL: "O:BAD:AI"}, ActionResetChild},
-		{"sem DACL", Entry{Exists: true, SDDL: "O:BA"}, ActionResetChild},
+		{"não existe", Entry{}, nil, ActionCreate},
+		{"tudo confere, vazia", root, nil, ActionOK},
+		{"tudo confere, com filhos", root, []Entry{good("a"), good("logs/x")}, ActionOK},
+		{"filho com dono SYSTEM confere", root, []Entry{with(good("a"), func(e *Entry) { e.SDDL = "O:SYD:AI(A;ID;FA;;;SY)" })}, ActionOK},
+		{"raiz é junção", with(root, func(e *Entry) { e.Reparse = true }), nil, ActionQuarantine},
+		{"raiz é arquivo", with(root, func(e *Entry) { e.IsDir = false }), nil, ActionQuarantine},
+		{"raiz ilegível", with(root, func(e *Entry) { e.Unreadable = true }), nil, ActionQuarantine},
+		{"filho junção", root, []Entry{good("a"), with(good("logs/j"), func(e *Entry) { e.Reparse = true })}, ActionQuarantine},
+		{"filho ilegível", root, []Entry{with(good("a"), func(e *Entry) { e.Unreadable = true })}, ActionQuarantine},
+		{"filho DACL protegida", root, []Entry{with(good("a"), func(e *Entry) { e.SDDL = "O:BAD:P(A;;FA;;;SY)(A;;FA;;;BA)" })}, ActionQuarantine},
+		{"filho ACE explícita", root, []Entry{with(good("a"), func(e *Entry) { e.SDDL = "O:BAD:AI(A;ID;FA;;;SY)(A;;FA;;;WD)" })}, ActionQuarantine},
+		{"filho dono usuário", root, []Entry{with(good("a"), func(e *Entry) { e.SDDL = "O:S-1-5-21-1-2-3-1001D:AI(A;ID;FA;;;SY)" })}, ActionQuarantine},
+		{"filho DACL vazia", root, []Entry{with(good("a"), func(e *Entry) { e.SDDL = "O:BAD:AI" })}, ActionQuarantine},
+		{"filho sem DACL", root, []Entry{with(good("a"), func(e *Entry) { e.SDDL = "O:BA" })}, ActionQuarantine},
+		{"raiz vazia, DACL errada, dono BA", with(root, func(e *Entry) { e.SDDL = "O:BAD:AI(A;OICI;FA;;;SY)" }), nil, ActionReapplyRoot},
+		{"raiz vazia, dono SYSTEM", with(root, func(e *Entry) { e.SDDL = "O:SYD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)" }), nil, ActionReapplyRoot},
+		{"raiz vazia, dono usuário", with(root, func(e *Entry) { e.SDDL = "O:S-1-5-21-1-2-3-1001D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)" }), nil, ActionQuarantine},
+		{"raiz com conteúdo, DACL errada", with(root, func(e *Entry) { e.SDDL = "O:BAD:P(D;OICI;FA;;;SY)(A;OICI;FA;;;BA)" }), []Entry{good("a")}, ActionQuarantine},
 	}
 	for _, c := range cases {
-		if got := DecideChild(c.e); got != c.want {
-			t.Errorf("%s: %v, quer %v", c.name, got, c.want)
+		d := Decide(c.root, c.children)
+		if d.Action != c.want {
+			t.Errorf("%s: %v (%s), quer %v", c.name, d.Action, d.Reason, c.want)
+		}
+		if d.Action != ActionOK && d.Reason == "" {
+			t.Errorf("%s: sem motivo", c.name)
 		}
 	}
 }

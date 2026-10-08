@@ -1,37 +1,44 @@
 package acl
 
-import "strings"
+import (
+	"fmt"
+	"strings"
+)
 
-// Action é o que fazer com uma entrada da pasta de dados, decidido a partir
-// do estado observado (lógica pura, sem E/S).
+// Action é o que fazer com a pasta de dados, decidido a partir do estado
+// observado (lógica pura, sem E/S).
 type Action int
 
 const (
-	// ActionOK: nada a fazer.
+	// ActionOK: raiz e toda a árvore conferem.
 	ActionOK Action = iota
-	// ActionCreateRoot: a raiz não existe; criar já com o descritor.
-	ActionCreateRoot
-	// ActionQuarantineRoot: raiz não confiável (reparse, não é pasta ou dono
-	// estranho); renomear para o lado e recriar.
-	ActionQuarantineRoot
-	// ActionApplyRoot: raiz confiável, mas dono/DACL divergem; reaplicar.
-	ActionApplyRoot
-	// ActionRemoveLink: filho é ponto de reparse; remover só o link.
-	ActionRemoveLink
-	// ActionResetChild: filho com dono, herança ou ACE explícita indevidos.
-	ActionResetChild
+	// ActionCreate: a raiz não existe; criar já com o descritor.
+	ActionCreate
+	// ActionReapplyRoot: raiz vazia, não é link, dono confiável, mas dono/DACL
+	// divergem; reaplicar o descritor por handle.
+	ActionReapplyRoot
+	// ActionQuarantine: qualquer outro desvio; renomear a raiz inteira para o
+	// lado e recriá-la vazia.
+	ActionQuarantine
 )
 
-// Entry é o estado observado de uma entrada.
+// Entry é o estado observado de uma entrada. Path é só para as mensagens.
 type Entry struct {
-	Exists  bool
-	IsDir   bool
-	Reparse bool   // symlink, junção ou outro ponto de reparse
-	SDDL    string // dono + DACL (vazio se não lido)
+	Path       string
+	Exists     bool
+	IsDir      bool
+	Reparse    bool   // symlink, junção ou outro ponto de reparse
+	Unreadable bool   // não foi possível observar (ex.: acesso negado)
+	SDDL       string // dono + DACL
 }
 
-// OwnerTrusted diz se o dono de uma raiz já existente é Administradores ou
-// SYSTEM (formas abreviada e por SID).
+// Decision é a ação escolhida e, quando há desvio, o motivo.
+type Decision struct {
+	Action Action
+	Reason string
+}
+
+// OwnerTrusted diz se o dono é Administradores ou SYSTEM (abreviado ou SID).
 func OwnerTrusted(owner string) bool {
 	switch owner {
 	case "BA", "SY", "S-1-5-32-544", "S-1-5-18":
@@ -40,62 +47,69 @@ func OwnerTrusted(owner string) bool {
 	return false
 }
 
-// DecideRoot escolhe a ação para a raiz da pasta de dados.
-func DecideRoot(e Entry) Action {
-	if !e.Exists {
-		return ActionCreateRoot
+// Decide escolhe a ação para a raiz e os filhos já observados (sem seguir
+// links; entradas de reparse vêm marcadas e não são percorridas).
+func Decide(root Entry, children []Entry) Decision {
+	if !root.Exists {
+		return Decision{ActionCreate, "a pasta não existe"}
 	}
-	if e.Reparse || !e.IsDir {
-		return ActionQuarantineRoot
+	switch {
+	case root.Unreadable:
+		return Decision{ActionQuarantine, "raiz ilegível"}
+	case root.Reparse:
+		return Decision{ActionQuarantine, "raiz é ponto de reparse"}
+	case !root.IsDir:
+		return Decision{ActionQuarantine, "raiz não é pasta"}
 	}
-	owner, _ := section(e.SDDL, "O:")
-	if !OwnerTrusted(owner) {
-		return ActionQuarantineRoot
+	for _, c := range children {
+		if why := childProblem(c); why != "" {
+			return Decision{ActionQuarantine, fmt.Sprintf("%s: %s", c.Path, why)}
+		}
 	}
-	if !Matches(e.SDDL) {
-		return ActionApplyRoot
+	if Matches(root.SDDL) {
+		return Decision{ActionOK, ""}
 	}
-	return ActionOK
+	owner, _ := section(root.SDDL, "O:")
+	if len(children) == 0 && OwnerTrusted(owner) {
+		return Decision{ActionReapplyRoot, "dono ou DACL da raiz divergem"}
+	}
+	return Decision{ActionQuarantine, "dono ou DACL da raiz divergem e há conteúdo ou dono não confiável"}
 }
 
-// DecideChild escolhe a ação para uma entrada abaixo da raiz.
-func DecideChild(e Entry) Action {
+// childProblem devolve por que um filho não confere ("" se confere): não é
+// reparse, dono BA/SY, DACL não protegida e só com ACEs herdadas (ao menos uma).
+func childProblem(e Entry) string {
+	if e.Unreadable {
+		return "ilegível"
+	}
 	if e.Reparse {
-		return ActionRemoveLink
+		return "ponto de reparse"
 	}
-	if !ChildMatches(e.SDDL) {
-		return ActionResetChild
+	owner, ok := section(e.SDDL, "O:")
+	if !ok || !OwnerTrusted(owner) {
+		return "dono não confiável"
 	}
-	return ActionOK
-}
-
-// ChildMatches confere um filho: dono Administradores, DACL não protegida e
-// só ACEs herdadas (flag ID), ao menos uma.
-func ChildMatches(sddl string) bool {
-	owner, ok := section(sddl, "O:")
-	if !ok || owner != "BA" {
-		return false
-	}
-	d, ok := section(sddl, "D:")
+	d, ok := section(e.SDDL, "D:")
 	if !ok {
-		return false
+		return "sem DACL"
 	}
 	open := strings.IndexByte(d, '(')
-	if open < 0 || strings.Contains(d[:open], "P") {
-		return false
+	if open < 0 {
+		return "DACL vazia"
 	}
-	n := 0
+	if strings.Contains(d[:open], "P") {
+		return "DACL protegida"
+	}
 	for _, part := range strings.Split(d[open:], ")") {
 		if part = strings.TrimPrefix(part, "("); part == "" {
 			continue
 		}
 		fields := strings.Split(part, ";")
 		if len(fields) < 2 || !hasFlag(fields[1], "ID") {
-			return false
+			return "ACE explícita"
 		}
-		n++
 	}
-	return n > 0
+	return ""
 }
 
 // hasFlag procura um flag de 2 letras (OI, CI, ID…) numa sequência de flags.

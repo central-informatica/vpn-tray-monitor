@@ -53,7 +53,7 @@ func (w *winWatcher) HasPhysicalDefaultRoute() (bool, error) {
 	}
 	defer windows.FreeMibTable(unsafe.Pointer(table))
 	var routes []Route
-	defaults, failed := 0, 0
+	defaults, failed, gone := 0, 0, 0
 	var lastErr error
 	for _, r := range table.Rows() {
 		if r.DestinationPrefix.PrefixLength != 0 {
@@ -63,7 +63,8 @@ func (w *winWatcher) HasPhysicalDefaultRoute() (bool, error) {
 		row := windows.MibIfRow2{InterfaceLuid: r.InterfaceLuid, InterfaceIndex: r.InterfaceIndex}
 		if err := windows.GetIfEntry2Ex(windows.MibIfEntryNormalWithoutStatistics, &row); err != nil {
 			if errors.Is(err, windows.ERROR_FILE_NOT_FOUND) {
-				continue // a interface sumiu entre as duas leituras
+				gone++ // a interface sumiu entre as duas leituras
+				continue
 			}
 			failed++
 			lastErr = err
@@ -71,7 +72,7 @@ func (w *winWatcher) HasPhysicalDefaultRoute() (bool, error) {
 		}
 		routes = append(routes, Route{PrefixLen: 0, IfType: row.Type, OperUp: row.OperStatus == windows.IfOperStatusUp})
 	}
-	if defaults > 0 && failed == defaults {
+	if failed > 0 && failed == defaults-gone {
 		return false, fmt.Errorf("lendo as interfaces das rotas padrão: %w", lastErr)
 	}
 	return HasPhysicalDefault(routes), nil
