@@ -269,6 +269,16 @@ Pasta `C:\ProgramData\VPNMonitor\`, ACL: SYSTEM e Administradores com controle
 total, herança desligada, nenhum outro acesso. Criada pelo MSI e verificada e
 corrigida pelo serviço a cada início.
 
+Raiz com dono não confiável (nem SYSTEM nem Administradores) vai para a
+quarentena mesmo vazia. É intencional: quem pré-cria a pasta mantém `WRITE_DAC`
+sobre ela e poderia reabrir a ACL depois da correção.
+
+Processos elevados da CLI e do `run` definem Administradores como dono padrão
+do token (`TokenOwner`) na partida; sem isso o Windows cria os arquivos com
+dono = conta do usuário e o serviço poria a pasta em quarentena no início
+seguinte. O serviço registra no log, uma vez na partida, o dono padrão do seu
+token (diagnóstico).
+
 ```
 config.json
 state.json
