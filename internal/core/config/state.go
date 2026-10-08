@@ -49,7 +49,7 @@ func (e *CorruptStateError) Error() string {
 // (não fatal: o chamador registra e segue).
 func LoadState(path string, now time.Time) (State, error) {
 	empty := State{Pauses: map[string]Pause{}, Rejections: map[string]Rejection{}}
-	data, err := os.ReadFile(path)
+	data, err := shared.ReadFileShared(path)
 	if errors.Is(err, fs.ErrNotExist) {
 		return empty, nil
 	}

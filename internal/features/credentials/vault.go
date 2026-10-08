@@ -117,7 +117,7 @@ func (v Vault) Get(name string) (user string, password shared.Secret, ok bool, e
 // get lê a credencial e devolve também a impressão digital do MESMO blob
 // lido (sem segunda leitura do arquivo).
 func (v Vault) get(name string) (user string, password shared.Secret, fp string, ok bool, err error) {
-	blob, err := os.ReadFile(v.path(name))
+	blob, err := shared.ReadFileShared(v.path(name))
 	if errors.Is(err, fs.ErrNotExist) {
 		return "", shared.Secret{}, "", false, nil
 	}
@@ -158,7 +158,7 @@ func (v Vault) Has(name string) bool {
 // senha gera um blob DPAPI novo e portanto conta como mudança (aceitável: é
 // ação explícita do administrador).
 func (v Vault) Fingerprint(name string) (fp string, exists bool, err error) {
-	blob, err := os.ReadFile(v.path(name))
+	blob, err := shared.ReadFileShared(v.path(name))
 	if errors.Is(err, fs.ErrNotExist) {
 		return "", false, nil
 	}

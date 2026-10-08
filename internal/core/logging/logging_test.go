@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/guibsu/vpn-tray-monitor/internal/shared"
 )
 
 func TestRotationKeepsMaxFiles(t *testing.T) {
@@ -167,5 +169,34 @@ func TestTailNonPositive(t *testing.T) {
 		if got, err := Tail(p, n); err != nil || got != "" {
 			t.Fatalf("Tail(%d) = %q, %v", n, got, err)
 		}
+	}
+}
+
+// Tail lendo o log (handle aberto como o de Tail) não impede a rotação; no
+// Windows, um os.Open sem FILE_SHARE_DELETE faria o rename falhar.
+func TestRotationWhileTailHoldsLog(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "vpnmon.log")
+	w, err := OpenRotating(p, 10, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer w.Close()
+	if _, err := w.Write([]byte("aaaaaaaa\n")); err != nil {
+		t.Fatal(err)
+	}
+	f, err := shared.OpenShared(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	if _, err := w.Write([]byte("bbbbbbbb\n")); err != nil {
+		t.Fatal(err)
+	}
+	if b, err := os.ReadFile(filepath.Join(dir, "vpnmon.1.log")); err != nil || string(b) != "aaaaaaaa\n" {
+		t.Fatalf("rotação bloqueada pelo leitor: %q %v", b, err)
+	}
+	if s, err := Tail(p, 100); err != nil || s != "bbbbbbbb\n" {
+		t.Fatalf("Tail: %q %v", s, err)
 	}
 }

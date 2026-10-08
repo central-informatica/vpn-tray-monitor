@@ -10,7 +10,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"os"
 
 	"github.com/guibsu/vpn-tray-monitor/internal/shared"
 )
@@ -230,7 +229,7 @@ func Marshal(c Config) ([]byte, error) {
 
 // Load lê e valida o arquivo.
 func Load(path string) (Config, error) {
-	data, err := os.ReadFile(path)
+	data, err := shared.ReadFileShared(path)
 	if err != nil {
 		return Config{}, err
 	}

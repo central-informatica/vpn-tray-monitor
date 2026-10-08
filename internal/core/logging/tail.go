@@ -3,7 +3,8 @@ package logging
 import (
 	"bytes"
 	"io"
-	"os"
+
+	"github.com/guibsu/vpn-tray-monitor/internal/shared"
 )
 
 // Tail devolve no máximo maxBytes do fim do arquivo, começando numa linha
@@ -12,7 +13,8 @@ func Tail(path string, maxBytes int64) (string, error) {
 	if maxBytes <= 0 {
 		return "", nil
 	}
-	f, err := os.Open(path)
+	// Compartilhado: não pode impedir a rotação de renomear o arquivo.
+	f, err := shared.OpenShared(path)
 	if err != nil {
 		return "", err
 	}
