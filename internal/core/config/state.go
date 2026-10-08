@@ -11,9 +11,21 @@ import (
 	"github.com/guibsu/vpn-tray-monitor/internal/shared"
 )
 
-// State é o conteúdo de state.json: pausas por VPN (chave = NameKey).
+// State é o conteúdo de state.json, por VPN (chave = NameKey): pausas e
+// rejeições recentes de credencial. Campos novos são opcionais: o
+// state.json de versões anteriores continua legível.
 type State struct {
 	Pauses map[string]Pause `json:"pauses"`
+	// Rejections guarda só instantes, nunca impressão digital ou hash da
+	// credencial (§4.7): na partida, uma rejeição com menos de 15 min impede
+	// discar sozinho até a janela vencer.
+	Rejections map[string]Rejection `json:"rejections,omitempty"`
+}
+
+// Rejection é a última rejeição de credencial de uma VPN (Unix, segundos).
+type Rejection struct {
+	RejectedAtUnix    int64 `json:"rejectedAtUnix"`
+	LastManualTryUnix int64 `json:"lastManualTryUnix,omitempty"`
 }
 
 // Pause é uma pausa temporária (UntilUnix) ou indefinida.
@@ -36,7 +48,7 @@ func (e *CorruptStateError) Error() string {
 // para state.json.corrompido-<data>, devolve vazio e *CorruptStateError
 // (não fatal: o chamador registra e segue).
 func LoadState(path string, now time.Time) (State, error) {
-	empty := State{Pauses: map[string]Pause{}}
+	empty := State{Pauses: map[string]Pause{}, Rejections: map[string]Rejection{}}
 	data, err := os.ReadFile(path)
 	if errors.Is(err, fs.ErrNotExist) {
 		return empty, nil
@@ -54,6 +66,9 @@ func LoadState(path string, now time.Time) (State, error) {
 	}
 	if s.Pauses == nil {
 		s.Pauses = map[string]Pause{}
+	}
+	if s.Rejections == nil {
+		s.Rejections = map[string]Rejection{}
 	}
 	return s, nil
 }

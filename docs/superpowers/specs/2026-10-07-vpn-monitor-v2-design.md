@@ -343,7 +343,10 @@ gera uma config vazia válida (nenhuma VPN) e aguarda.
 
 ### 5.5 `state.json`
 
-Guarda pausas (`pausedUntil` ou indefinida) por VPN. Corrompido → renomeado para
+Guarda pausas (`pausedUntil` ou indefinida) por VPN e, opcionalmente, a última
+rejeição de credencial (`rejectedAtUnix`, `lastManualTryUnix` — só instantes,
+nunca impressão digital ou hash): na partida, uma rejeição com menos de 15 min
+impede discar sozinho até a janela vencer (§4.7). Corrompido → renomeado para
 `state.json.corrompido-<data>` e o serviço segue com estado vazio.
 
 ### 5.6 Logs

@@ -153,6 +153,11 @@ func New(opts Options, cfg config.Config, st config.State) *Orchestrator {
 		pauses[k] = p
 	}
 	st.Pauses = pauses
+	rejections := make(map[string]config.Rejection, len(st.Rejections))
+	for k, r := range st.Rejections {
+		rejections[k] = r
+	}
+	st.Rejections = rejections
 	return &Orchestrator{opts: opts, queue: &DialQueue{}, bus: newBus(256), stopping: make(chan struct{}),
 		cfg: cfg, state: st, sups: map[string]*running{}, draining: map[*running]struct{}{},
 		removed: map[string]removedCred{}}
@@ -294,14 +299,22 @@ func (o *Orchestrator) apply(cfg config.Config) error {
 	for _, r := range stop {
 		o.draining[r] = struct{}{}
 	}
-	pausesChanged := false
+	stateChanged := false
 	for key := range o.state.Pauses {
 		if !keep[key] {
 			delete(o.state.Pauses, key)
-			pausesChanged = true
+			stateChanged = true
 		}
 	}
-	if pausesChanged {
+	// A rejeição de uma VPN removida fica até a janela vencer: um reinício
+	// logo após remover e adicionar de novo também a respeita.
+	for key, rec := range o.state.Rejections {
+		if !keep[key] && !o.opts.Clock.Now().Before(rejectionMemory(rec).Until) {
+			delete(o.state.Rejections, key)
+			stateChanged = true
+		}
+	}
+	if stateChanged {
 		if err := config.SaveState(o.opts.Paths.StateFile, o.state); err != nil {
 			o.opts.Log.Error("gravando state.json", "erro", err)
 		}
@@ -495,7 +508,39 @@ func (o *Orchestrator) credMemoryLocked(key string, now time.Time) (domain.CredM
 			return rm.mem, true
 		}
 	}
+	if rec, ok := o.state.Rejections[key]; ok {
+		// Reinício do serviço: sem impressão digital (nunca vai ao disco).
+		if m := rejectionMemory(rec); now.Before(m.Until) {
+			return m, true
+		}
+	}
 	return domain.CredMemory{}, false
+}
+
+func unixTime(sec int64) time.Time {
+	if sec == 0 {
+		return time.Time{}
+	}
+	return time.Unix(sec, 0)
+}
+
+// rejectionMemory converte a rejeição do state.json em memória de
+// credencial: impressão desconhecida e bloqueio só até o fim da janela de
+// 15 min contada da última tentativa.
+func rejectionMemory(rec config.Rejection) domain.CredMemory {
+	m := domain.CredMemory{FPUnknown: true, RejectedAt: unixTime(rec.RejectedAtUnix), LastManualTry: unixTime(rec.LastManualTryUnix)}
+	m.Until = m.Ref().Add(domain.ManualRetryWindow)
+	return m
+}
+
+// rejectionRecord é o que vai ao state.json de um estado: só os instantes
+// da memória de credencial rejeitada (ok=false se não há).
+func rejectionRecord(s domain.Status) (config.Rejection, bool) {
+	m, ok := domain.CredMemoryOf(s)
+	if !ok || (m.RejectedAt.IsZero() && m.LastManualTry.IsZero()) {
+		return config.Rejection{}, false
+	}
+	return config.Rejection{RejectedAtUnix: unix(m.RejectedAt), LastManualTryUnix: unix(m.LastManualTry)}, true
 }
 
 func credentialBlocked(s domain.Status) bool {
@@ -574,13 +619,28 @@ func (o *Orchestrator) onUpdate(r *running, sup *Supervisor, u Update) {
 		return // sendo parado pela recarga, ou removido
 	}
 	r.last = u.Status
+	dirty := false
 	if u.PauseChanged {
-		// Só a pausa vai para o disco; nada de credencial ou impressão digital.
 		if rec := u.Status.PauseRecord(); rec == (config.Pause{}) {
 			delete(o.state.Pauses, key)
 		} else {
 			o.state.Pauses[key] = rec
 		}
+		dirty = true
+	}
+	// Da credencial, só os instantes da rejeição vão para o disco; nunca a
+	// impressão digital.
+	rec, blocked := rejectionRecord(u.Status)
+	cur, had := o.state.Rejections[key]
+	switch {
+	case blocked && (!had || cur != rec):
+		o.state.Rejections[key] = rec
+		dirty = true
+	case !blocked && had:
+		delete(o.state.Rejections, key)
+		dirty = true
+	}
+	if dirty {
 		if err := config.SaveState(o.opts.Paths.StateFile, o.state); err != nil {
 			o.opts.Log.Error("gravando state.json", "erro", err)
 		}

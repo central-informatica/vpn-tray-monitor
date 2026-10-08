@@ -603,3 +603,129 @@ func TestStopWaitsSupervisorsBeingReloaded(t *testing.T) {
 	}
 	<-applied
 }
+
+// I1(c) A rejeição vai para o state.json (só instantes, nunca a impressão
+// digital) e sai dele quando a credencial muda.
+func TestCredentialRejectionPersistsWithoutFingerprint(t *testing.T) {
+	w := &stubWorld{network: true, outcomes: rejected()}
+	h := newOrch(t, w, cfgWith(vpnNamed("Matriz")), config.State{})
+	h.waitView("Matriz", domain.CredencialInvalida)
+	st, err := config.LoadState(h.paths.StateFile, t0)
+	if err != nil || st.Rejections["matriz"].RejectedAtUnix != t0.Unix() {
+		t.Fatalf("state.json: %+v %v", st, err)
+	}
+	b, _ := os.ReadFile(h.paths.StateFile)
+	if strings.Contains(string(b), "fp1") {
+		t.Fatalf("impressão digital no state.json: %s", b)
+	}
+	w.set(func(w *stubWorld) { w.fp = "fp2" })
+	h.o.CredentialsChanged()
+	h.waitView("Matriz", domain.Conectada)
+	waitUntil(t, func() bool {
+		st, _ := config.LoadState(h.paths.StateFile, t0)
+		return len(st.Rejections) == 0
+	})
+}
+
+func waitUntil(t *testing.T, cond func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for !cond() {
+		if time.Now().After(deadline) {
+			t.Fatal("condição não atingida")
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+}
+
+// Reinício do serviço dentro da janela de 15 min: não disca sozinho até a
+// janela vencer, mesmo com uma credencial qualquer no cofre.
+func TestStartupWithinRejectionWindowWaits(t *testing.T) {
+	w := &stubWorld{network: true}
+	st := config.State{Rejections: map[string]config.Rejection{
+		"matriz": {RejectedAtUnix: t0.Add(-5 * time.Minute).Unix()},
+	}}
+	h := newOrch(t, w, cfgWith(vpnNamed("Matriz")), st)
+	h.waitView("Matriz", domain.CredencialInvalida)
+	var e *ipc.Error
+	var err error
+	waitUntil(t, func() bool { // o supervisor sobe logo depois do primeiro estado
+		err = h.o.Reconnect("Matriz")
+		return !asIPC(err, &e) || e.Code != ipc.CodeInternal
+	})
+	if !asIPC(err, &e) || e.Code != ipc.CodeCredentialRejected || !strings.Contains(e.Message, "10 min") {
+		t.Fatalf("reconnect dentro da janela: %v", err)
+	}
+	for range 9 {
+		h.clk.Advance(time.Minute)
+	}
+	time.Sleep(50 * time.Millisecond)
+	if n := len(w.get().dials); n != 0 {
+		t.Fatalf("discou dentro da janela: %d", n)
+	}
+	h.clk.Advance(time.Minute) // t0+10 min = rejeição + 15 min
+	h.waitView("Matriz", domain.Conectada)
+	if n := len(w.get().dials); n != 1 {
+		t.Fatalf("discagens = %d", n)
+	}
+}
+
+// Fora da janela, a rejeição antiga do state.json não vale.
+func TestStartupAfterRejectionWindowDials(t *testing.T) {
+	w := &stubWorld{network: true}
+	st := config.State{Rejections: map[string]config.Rejection{
+		"matriz": {RejectedAtUnix: t0.Add(-20 * time.Minute).Unix(), LastManualTryUnix: t0.Add(-16 * time.Minute).Unix()},
+	}}
+	h := newOrch(t, w, cfgWith(vpnNamed("Matriz")), st)
+	h.waitView("Matriz", domain.Conectada)
+}
+
+// A tentativa manual mais recente conta para a janela; e uma troca real da
+// credencial depois da partida desbloqueia antes dela.
+func TestStartupRejectionUnlocksOnRealCredentialChange(t *testing.T) {
+	w := &stubWorld{network: true}
+	st := config.State{Rejections: map[string]config.Rejection{
+		"matriz": {RejectedAtUnix: t0.Add(-30 * time.Minute).Unix(), LastManualTryUnix: t0.Add(-time.Minute).Unix()},
+	}}
+	h := newOrch(t, w, cfgWith(vpnNamed("Matriz")), st)
+	h.waitView("Matriz", domain.CredencialInvalida)
+	// A impressão atual (fp1) é aprendida como a rejeitada logo na partida.
+	waitUntil(t, func() bool {
+		h.o.mu.Lock()
+		defer h.o.mu.Unlock()
+		b := h.o.sups["matriz"].base
+		return b.BlockedFP == "fp1" && !b.BlockedFPUnknown
+	})
+	h.o.CredentialsChanged() // mesma credencial: segue bloqueada
+	h.clk.Advance(time.Minute)
+	time.Sleep(50 * time.Millisecond)
+	if n := len(w.get().dials); n != 0 {
+		t.Fatalf("mesma credencial discou: %d", n)
+	}
+	w.set(func(w *stubWorld) { w.fp = "fp2" })
+	h.o.CredentialsChanged()
+	h.waitView("Matriz", domain.Conectada)
+}
+
+// Remover a VPN mantém a rejeição no state.json até a janela vencer (um
+// reinício logo após remover e adicionar também é coberto); vencida, sai.
+func TestRemovedVPNRejectionExpiresFromStateFile(t *testing.T) {
+	w := &stubWorld{network: true, outcomes: rejected()}
+	h := newOrch(t, w, cfgWith(vpnNamed("Matriz")), config.State{})
+	h.waitView("Matriz", domain.CredencialInvalida)
+	h.o.applyMu.Lock()
+	h.o.apply(cfgWith())
+	h.o.applyMu.Unlock()
+	st, _ := config.LoadState(h.paths.StateFile, t0)
+	if _, ok := st.Rejections["matriz"]; !ok {
+		t.Fatalf("rejeição recente da VPN removida deveria ficar: %+v", st)
+	}
+	h.clk.Advance(domain.ManualRetryWindow)
+	h.o.applyMu.Lock()
+	h.o.apply(cfgWith(vpnNamed("Filial")))
+	h.o.applyMu.Unlock()
+	st, _ = config.LoadState(h.paths.StateFile, t0)
+	if _, ok := st.Rejections["matriz"]; ok {
+		t.Fatalf("rejeição vencida da VPN removida deveria sair: %+v", st)
+	}
+}

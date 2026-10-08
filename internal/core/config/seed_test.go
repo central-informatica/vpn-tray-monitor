@@ -128,3 +128,35 @@ func TestStateCorruptIsQuarantined(t *testing.T) {
 		t.Fatal("state.json corrompido deveria ter saído do lugar")
 	}
 }
+
+// state.json de versões anteriores (só pausas) continua legível; as
+// rejeições de credencial são opcionais e só levam instantes (nunca
+// impressão digital).
+func TestStateRejectionsOptionalAndRoundTrip(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "state.json")
+	_ = os.WriteFile(p, []byte(`{"pauses":{"matriz":{"indefinite":true}}}`+"\n"), 0o600)
+	s, err := LoadState(p, t0)
+	if err != nil || !s.Pauses["matriz"].Indefinite || s.Rejections == nil || len(s.Rejections) != 0 {
+		t.Fatalf("state.json antigo: %+v %v", s, err)
+	}
+	s.Rejections["matriz"] = Rejection{RejectedAtUnix: 1700000000, LastManualTryUnix: 1700000600}
+	if err := SaveState(p, s); err != nil {
+		t.Fatal(err)
+	}
+	got, err := LoadState(p, t0)
+	if err != nil || got.Rejections["matriz"] != (Rejection{RejectedAtUnix: 1700000000, LastManualTryUnix: 1700000600}) {
+		t.Fatalf("ida e volta: %+v %v", got, err)
+	}
+	b, _ := os.ReadFile(p)
+	if !strings.Contains(string(b), `"rejectedAtUnix": 1700000000`) {
+		t.Fatalf("gravado: %s", b)
+	}
+	// Sem rejeições, o campo some (o arquivo fica igual ao de antes).
+	got.Rejections = nil
+	_ = SaveState(p, got)
+	b, _ = os.ReadFile(p)
+	if strings.Contains(string(b), "rejections") {
+		t.Fatalf("rejections vazio deveria ser omitido: %s", b)
+	}
+}
