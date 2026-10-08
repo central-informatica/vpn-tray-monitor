@@ -57,6 +57,20 @@ func TestStateNamesMatchProtocol(t *testing.T) {
 	}
 }
 
+// Os tipos de aviso do protocolo (que a bandeja usa para escolher o ícone e
+// agrupar o balão) são os mesmos do domínio.
+func TestNoticeKindsMatchProtocol(t *testing.T) {
+	pairs := map[domain.NoticeKind]string{
+		domain.NoticeDown: ipc.NoticeDown, domain.NoticeUp: ipc.NoticeUp,
+		domain.NoticeCredential: ipc.NoticeCredential, domain.NoticeConfig: ipc.NoticeConfig,
+	}
+	for d, p := range pairs {
+		if string(d) != p {
+			t.Errorf("domínio %q × protocolo %q", d, p)
+		}
+	}
+}
+
 func TestToViewLatencyCeil(t *testing.T) {
 	v := config.VPN{Name: "M", Check: config.Check{Kind: config.CheckPing}}
 	cases := map[time.Duration]int64{0: 0, time.Microsecond: 1, time.Millisecond: 1, 1100 * time.Microsecond: 2, 12 * time.Millisecond: 12}

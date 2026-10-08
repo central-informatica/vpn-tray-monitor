@@ -116,6 +116,15 @@ const (
 	ClassConfiguracao = "configuracao"
 )
 
+// Valores de NoticeEvent.Kind (os mesmos de domain.NoticeKind; um teste do
+// serviço os amarra).
+const (
+	NoticeDown       = "down"
+	NoticeUp         = "up"
+	NoticeCredential = "credential"
+	NoticeConfig     = "config"
+)
+
 // Payloads de pedidos.
 type (
 	Hello struct {

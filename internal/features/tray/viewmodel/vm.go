@@ -123,9 +123,9 @@ func (vm *VM) Apply(ev client.Event) {
 
 func balloonKind(noticeKind string) BalloonKind {
 	switch noticeKind {
-	case "down":
+	case ipc.NoticeDown:
 		return BalloonWarning
-	case "credential", "config":
+	case ipc.NoticeCredential, ipc.NoticeConfig:
 		return BalloonError
 	}
 	return BalloonInfo
@@ -135,10 +135,10 @@ func balloonKind(noticeKind string) BalloonKind {
 // com várias VPNs, frase com uma, e rótulo quando há tipos misturados. O
 // último grupo recebe os tipos que esta bandeja não conhece.
 var noticeGroups = []struct{ kind, many, one, label string }{
-	{"down", "%d VPNs caíram: %s", "VPN %s caiu", "Caíram"},
-	{"credential", "%d VPNs com credencial rejeitada: %s", "VPN %s: credencial rejeitada", "Credencial rejeitada"},
-	{"config", "%d VPNs com erro de configuração: %s", "VPN %s: erro de configuração", "Erro de configuração"},
-	{"up", "%d VPNs voltaram: %s", "VPN %s voltou", "Voltaram"},
+	{ipc.NoticeDown, "%d VPNs caíram: %s", "VPN %s caiu", "Caíram"},
+	{ipc.NoticeCredential, "%d VPNs com credencial rejeitada: %s", "VPN %s: credencial rejeitada", "Credencial rejeitada"},
+	{ipc.NoticeConfig, "%d VPNs com erro de configuração: %s", "VPN %s: erro de configuração", "Erro de configuração"},
+	{ipc.NoticeUp, "%d VPNs voltaram: %s", "VPN %s voltou", "Voltaram"},
 	{"", "%d VPNs com avisos: %s", "Aviso da VPN %s", "Outros avisos"},
 }
 
