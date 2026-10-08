@@ -41,17 +41,27 @@ type Update struct {
 	PauseChanged bool
 }
 
+// DefaultStopWait é quanto Run espera as operações canceladas voltarem.
+const DefaultStopWait = 5 * time.Second
+
 // Deps são as dependências de um supervisor.
 type Deps struct {
-	Clock    shared.Clock
-	Link     LinkProber
-	Checker  adapters.Checker
-	Dialer   Dialer
-	Queue    *DialQueue
-	Creds    Fingerprinter
-	Rand     func() float64
-	Log      *slog.Logger
+	Clock   shared.Clock
+	Link    LinkProber
+	Checker adapters.Checker
+	Dialer  Dialer
+	Queue   *DialQueue
+	Creds   Fingerprinter
+	Rand    func() float64
+	Log     *slog.Logger
+	// OnUpdate roda dentro do ator: não pode bloquear nem chamar métodos do
+	// supervisor de forma síncrona (deadlock). Entregue a outra goroutine
+	// ou a um canal com folga.
 	OnUpdate func(Update)
+	// StopWait limita a espera, em tempo real, pelas operações canceladas
+	// ao sair do Run (parada ou panic); zero = DefaultStopWait. Operação que
+	// não volta a tempo é abandonada e registrada no log.
+	StopWait time.Duration
 }
 
 type message struct {
@@ -65,6 +75,8 @@ type message struct {
 	// lingering: a sonda achou a entrada entre as conexões ativas, mas não
 	// conectada (handle preso). A discagem seguinte desliga antes.
 	lingering bool
+	// probeErr: a sonda de enlace falhou (resultado inconclusivo).
+	probeErr bool
 }
 
 // Supervisor é o ator de uma VPN: uma goroutine dona exclusiva do estado.
@@ -90,6 +102,9 @@ func NewSupervisor(v config.VPN, initial domain.Status, deps Deps) *Supervisor {
 	if deps.OnUpdate == nil {
 		deps.OnUpdate = func(Update) {}
 	}
+	if deps.StopWait <= 0 {
+		deps.StopWait = DefaultStopWait
+	}
 	return &Supervisor{
 		vpn: v, params: domain.ParamsFrom(v), deps: deps, initial: initial,
 		in: make(chan message), wake: make(chan struct{}, 1), stopped: make(chan struct{}),
@@ -105,7 +120,10 @@ func (s *Supervisor) Wake() {
 	}
 }
 
-// Send entrega uma entrada (comando ou evento) e espera a resposta.
+// Send entrega uma entrada (comando ou evento) e espera a resposta. Como
+// todos os métodos de comando (CheckNow, Reconnect, Pause, Resume,
+// CredentialChanged, PowerResume), bloqueia até o ator atender: o chamador
+// deve passar um ctx com prazo.
 func (s *Supervisor) Send(ctx context.Context, in domain.Input) (domain.Reply, error) {
 	m := message{in: in, reply: make(chan domain.Reply, 1)}
 	select {
@@ -166,7 +184,7 @@ func (s *Supervisor) fingerprint(ctx context.Context) string {
 
 // Run executa o ator até ctx terminar. Ao sair (ou num panic), cancela as
 // operações em andamento (a discagem desliga com RasHangUp) e espera elas
-// voltarem; o prazo global de parada é do orquestrador.
+// voltarem por no máximo Deps.StopWait; depois disso as abandona.
 func (s *Supervisor) Run(ctx context.Context) {
 	defer close(s.stopped)
 	ctx, stopOps := context.WithCancel(ctx)
@@ -185,7 +203,14 @@ func (s *Supervisor) Run(ctx context.Context) {
 		// Cancela todas as operações, inclusive as de gerações antigas, e
 		// libera as que estejam tentando entregar resultado.
 		stopOps()
-		ops.Wait()
+		done := make(chan struct{})
+		go func() { ops.Wait(); close(done) }()
+		select {
+		case <-done:
+		case <-time.After(s.deps.StopWait):
+			s.deps.Log.Error("operação não voltou após o cancelamento; abandonada",
+				"vpn", s.vpn.Name, "prazo", s.deps.StopWait)
+		}
 	}()
 
 	timer := s.deps.Clock.NewTimer(time.Hour)
@@ -273,16 +298,21 @@ func (s *Supervisor) Run(ctx context.Context) {
 			switch {
 			case m.panic != "":
 				panic(m.panic) // o orquestrador recupera e recria o supervisor
+			case m.result && m.gen != gen:
+				// operação cancelada: resultado velho, descartado
 			case m.result:
-				if m.gen != gen {
-					continue // operação cancelada: resultado velho
-				}
 				if cancelOp != nil {
 					cancelOp() // a operação já voltou; libera o contexto
 					cancelOp = nil
 				}
 				if m.in.Kind == domain.InLinkResult {
 					lingering = m.lingering
+					if m.probeErr {
+						// Inconclusivo: mantém o enlace como estava e deixa o
+						// alcance decidir; se estava caída, disca como antes.
+						m.in.LinkUp = status.State == domain.Conectada || status.State == domain.Degradada
+						m.in.Network = true
+					}
 				}
 				apply(m.in)
 			default:
@@ -292,9 +322,9 @@ func (s *Supervisor) Run(ctx context.Context) {
 				}
 				m.reply <- *r
 			}
-			if pendingWake && status.Op == domain.OpNone {
-				wake()
-			}
+		}
+		if pendingWake && status.Op == domain.OpNone {
+			wake()
 		}
 	}
 }
@@ -320,9 +350,9 @@ func (s *Supervisor) execute(runCtx, ctx context.Context, gen uint64, op domain.
 		res, err := s.deps.Link.Probe(ctx, entry)
 		if err != nil {
 			s.deps.Log.Warn("consultando o enlace", "erro", err)
-			res = adapters.LinkResult{Network: true}
+			res = adapters.LinkResult{}
 		}
-		deliver(message{result: true, lingering: !res.Up && res.Handle != 0,
+		deliver(message{result: true, probeErr: err != nil, lingering: !res.Up && res.Handle != 0,
 			in: domain.Input{Kind: domain.InLinkResult, LinkUp: res.Up, Network: res.Network}})
 	case domain.OpProbeReach:
 		r := s.deps.Checker.Check(ctx)

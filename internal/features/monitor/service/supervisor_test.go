@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"sync"
 	"testing"
@@ -31,16 +32,20 @@ type stubWorld struct {
 	hang      chan struct{} // Dial trava ignorando o ctx até fechar
 	cancelled int
 	panicOn   string
+	probeErr  bool // Probe devolve erro (RAS inconsultável)
 }
 
 func (w *stubWorld) Probe(ctx context.Context, _ string) (adapters.LinkResult, error) {
 	w.mu.Lock()
 	w.probes++
-	gate, p := w.gate, w.panicOn
+	gate, p, perr := w.gate, w.panicOn, w.probeErr
 	w.panicOn = "" // só uma vez
 	w.mu.Unlock()
 	if p == "probe" {
 		panic("bug na sonda")
+	}
+	if perr {
+		return adapters.LinkResult{}, errors.New("rasman parado")
 	}
 	if gate != nil {
 		<-gate
@@ -115,6 +120,12 @@ func vpnConfig() config.VPN {
 
 func start(t *testing.T, w *stubWorld, initial *domain.Status) *harness {
 	t.Helper()
+	return startWith(t, w, initial, nil)
+}
+
+// startWith permite ajustar as Deps (ex.: StopWait curto).
+func startWith(t *testing.T, w *stubWorld, initial *domain.Status, tweak func(*Deps)) *harness {
+	t.Helper()
 	clk := shared.NewFakeClock(t0)
 	h := &harness{t: t, clk: clk, w: w, updates: make(chan Update, 1000), done: make(chan any, 1)}
 	v := vpnConfig()
@@ -122,10 +133,14 @@ func start(t *testing.T, w *stubWorld, initial *domain.Status) *harness {
 	if initial != nil {
 		st = *initial
 	}
-	h.sup = NewSupervisor(v, st, Deps{
+	deps := Deps{
 		Clock: clk, Link: w, Checker: w, Dialer: w, Queue: &DialQueue{}, Creds: w,
 		OnUpdate: func(u Update) { h.updates <- u },
-	})
+	}
+	if tweak != nil {
+		tweak(&deps)
+	}
+	h.sup = NewSupervisor(v, st, deps)
 	ctx, cancel := context.WithCancel(context.Background())
 	h.cancel = cancel
 	go func() {
@@ -377,5 +392,51 @@ func TestStaleResultAfterReconnectIsDiscarded(t *testing.T) {
 	}
 	if d := w.get().dials; len(d) != 1 || !d[0].HangupFirst {
 		t.Fatalf("discagens %+v", d)
+	}
+}
+
+func TestProbeErrorWhileUpDoesNotReportDown(t *testing.T) {
+	w := &stubWorld{up: true, network: true, reachable: true}
+	h := start(t, w, nil)
+	h.waitState(domain.Conectada)
+	// RAS inconsultável com a VPN de pé: o alcance decide, sem "caiu" nem discagem.
+	w.set(func(w *stubWorld) { w.probeErr = true })
+	h.clk.Advance(30 * time.Second)
+	s, notices := h.waitState(domain.Conectada)
+	if len(notices) != 0 || len(w.get().dials) != 0 || s.LastCheck != t0.Add(30*time.Second) {
+		t.Fatalf("erro de sonda em Conectada: avisos %+v, discagens %+v, %+v", notices, w.get().dials, s)
+	}
+	// Alvo mudo também: vira Degradada pelo alcance, não queda.
+	w.set(func(w *stubWorld) { w.reachable = false })
+	h.clk.Advance(30 * time.Second)
+	if _, notices := h.waitState(domain.Degradada); len(notices) != 0 || len(w.get().dials) != 0 {
+		t.Fatalf("avisos %+v, discagens %+v", notices, w.get().dials)
+	}
+}
+
+func TestProbeErrorWhileDownDials(t *testing.T) {
+	w := &stubWorld{network: true, reachable: true, probeErr: true}
+	h := start(t, w, nil)
+	h.waitState(domain.Conectada)
+	if d := w.get().dials; len(d) != 1 {
+		t.Fatalf("erro de sonda com a VPN caída deve discar: %+v", d)
+	}
+}
+
+func TestStopDoesNotWaitForeverOnHungOperation(t *testing.T) {
+	hang := make(chan struct{})
+	defer close(hang)
+	w := &stubWorld{network: true, hang: hang} // discador preso ignorando o ctx
+	h := startWith(t, w, nil, func(d *Deps) { d.StopWait = 50 * time.Millisecond })
+	deadline := time.Now().Add(2 * time.Second)
+	for len(w.get().dials) == 0 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	h.cancel()
+	select {
+	case <-h.done:
+		h.done <- nil // para o Cleanup
+	case <-time.After(time.Second):
+		t.Fatal("Run deve abandonar a operação presa após StopWait")
 	}
 }

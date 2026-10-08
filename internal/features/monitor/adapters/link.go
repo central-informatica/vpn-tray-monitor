@@ -40,6 +40,8 @@ func FindActive(c ras.Client, entry string) (ras.ActiveConn, bool, error) {
 
 // Probe diz se o enlace está de pé e se há rede física. Com o enlace de pé
 // a rede é presumida. Falha ao consultar rotas não impede discar.
+// Erro só quando nem a enumeração funciona (resultado inconclusivo); entrada
+// enumerada com Status falhando é handle em desmontagem: caída e presa.
 func (p LinkProber) Probe(_ context.Context, entry string) (LinkResult, error) {
 	var lingering ras.Handle
 	a, found, err := FindActive(p.RAS, entry)
@@ -48,10 +50,7 @@ func (p LinkProber) Probe(_ context.Context, entry string) (LinkResult, error) {
 	}
 	if found {
 		st, err := p.RAS.Status(a.Handle)
-		if err != nil {
-			return LinkResult{}, err
-		}
-		if st.State == ras.StateConnected {
+		if err == nil && st.State == ras.StateConnected {
 			return LinkResult{Up: true, Network: true, Handle: a.Handle}, nil
 		}
 		lingering = a.Handle

@@ -109,6 +109,19 @@ func TestLinkProberReportsLingeringHandle(t *testing.T) {
 	}
 }
 
+func TestLinkProberStatusErrorIsLingering(t *testing.T) {
+	// Entrada enumerada mas Status falha (handle em desmontagem): caída com o
+	// handle preso, sem erro; erro só quando nem a enumeração funciona.
+	r := fake.NewRAS("VPN Matriz")
+	h := r.SetActive("VPN Matriz")
+	r.SetStatusErr(errors.New("handle inválido"))
+	p := LinkProber{RAS: r, Net: fake.NewNet()}
+	res, err := p.Probe(context.Background(), "VPN Matriz")
+	if err != nil || res.Up || !res.Network || res.Handle != h {
+		t.Fatalf("Status com erro: %+v %v", res, err)
+	}
+}
+
 type stubCreds struct {
 	creds Credentials
 	err   error
