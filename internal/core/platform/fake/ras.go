@@ -41,6 +41,8 @@ type RAS struct {
 	next      ras.Handle
 	watchers  []chan struct{}
 	activeErr error
+	hangUpErr error
+	statusErr error
 }
 
 // SetActiveErr define o erro devolvido por Active (nil limpa).
@@ -48,6 +50,21 @@ func (f *RAS) SetActiveErr(err error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.activeErr = err
+}
+
+// SetHangUpErr faz HangUp falhar com err (nil limpa); a chamada é registrada
+// e o handle é mantido, como numa falha real.
+func (f *RAS) SetHangUpErr(err error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.hangUpErr = err
+}
+
+// SetStatusErr faz Status falhar com err (nil limpa).
+func (f *RAS) SetStatusErr(err error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.statusErr = err
 }
 
 // NewRAS cria o fake com as entradas do catálogo.
@@ -154,6 +171,9 @@ func (f *RAS) StartDial(req ras.DialRequest) (ras.Handle, error) {
 func (f *RAS) Status(h ras.Handle) (ras.Status, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.statusErr != nil {
+		return ras.Status{}, f.statusErr
+	}
 	d, ok := f.dials[h]
 	if !ok {
 		for _, ah := range f.active {
@@ -184,6 +204,19 @@ func (f *RAS) Status(h ras.Handle) (ras.Status, error) {
 func (f *RAS) HangUp(h ras.Handle) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.hangUpErr != nil {
+		entry := ""
+		if d, ok := f.dials[h]; ok {
+			entry = d.entry
+		}
+		for e, ah := range f.active {
+			if ah == h {
+				entry = e
+			}
+		}
+		f.calls = append(f.calls, "HangUp "+entry)
+		return f.hangUpErr
+	}
 	entry := ""
 	if d, ok := f.dials[h]; ok {
 		entry = d.entry

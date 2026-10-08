@@ -2,6 +2,7 @@ package fake
 
 import (
 	"errors"
+	"slices"
 	"testing"
 
 	"github.com/guibsu/vpn-tray-monitor/internal/core/platform/ras"
@@ -88,5 +89,26 @@ func TestFakeRASActiveSortedAndErr(t *testing.T) {
 	f.SetActiveErr(errors.New("x"))
 	if _, err := f.Active(); err == nil {
 		t.Fatal("esperava erro")
+	}
+}
+
+func TestFakeRASInjectedFailures(t *testing.T) {
+	r := NewRAS("A")
+	h, _ := r.StartDial(ras.DialRequest{Entry: "A"})
+	r.SetStatusErr(errors.New("boom"))
+	if _, err := r.Status(h); err == nil {
+		t.Fatal("Status deve falhar")
+	}
+	r.SetStatusErr(nil)
+	r.SetHangUpErr(errors.New("preso"))
+	if err := r.HangUp(h); err == nil || !slices.Contains(r.Calls(), "HangUp A") {
+		t.Fatalf("HangUp deve falhar e ser registrado: %v", r.Calls())
+	}
+	if _, err := r.Status(h); err != nil {
+		t.Fatalf("handle mantido após HangUp falho: %v", err)
+	}
+	r.SetHangUpErr(nil)
+	if err := r.HangUp(h); err != nil {
+		t.Fatal(err)
 	}
 }

@@ -4,6 +4,7 @@ package adapters
 
 import (
 	"context"
+	"fmt"
 	"net"
 	"strconv"
 	"time"
@@ -40,7 +41,17 @@ func NewChecker(c config.Check, pinger icmp.Pinger, dial DialFunc) Checker {
 		}
 		return tcpChecker{dial: dial, addr: net.JoinHostPort(c.Host, strconv.Itoa(c.Port)), timeout: timeout}
 	}
-	return linkChecker{}
+	if c.Kind == config.CheckLink {
+		return linkChecker{}
+	}
+	return unknownChecker{kind: c.Kind}
+}
+
+// unknownChecker nunca dá OK: tipo desconhecido é erro de configuração.
+type unknownChecker struct{ kind config.CheckKind }
+
+func (u unknownChecker) Check(context.Context) ReachResult {
+	return ReachResult{Err: fmt.Errorf("tipo de verificação desconhecido: %q", u.kind)}
 }
 
 type pingChecker struct {
