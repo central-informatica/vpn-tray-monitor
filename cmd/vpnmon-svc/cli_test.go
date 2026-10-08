@@ -47,13 +47,14 @@ func newTestEnv(t *testing.T) *testEnv {
 		dial: func(context.Context) (*ipc.Client, error) {
 			return nil, errors.New("serviço VPN Monitor inacessível")
 		},
-		platform:   func() (Platform, error) { return Platform{}, errors.New("sem plataforma") },
-		install:    func(string) error { return nil },
-		uninstall:  func() error { return nil },
-		isService:  func() (bool, error) { return false, nil },
-		runService: func(svc.Hooks) error { return nil },
-		now:        func() time.Time { return time.Date(2026, 10, 7, 12, 0, 0, 0, time.UTC) },
-		interrupt:  func(ctx context.Context) (context.Context, context.CancelFunc) { return context.WithCancel(ctx) },
+		platform:     func() (Platform, error) { return Platform{}, errors.New("sem plataforma") },
+		install:      func(string) error { return nil },
+		uninstall:    func() error { return nil },
+		isService:    func() (bool, error) { return false, nil },
+		runService:   func(svc.Hooks) error { return nil },
+		ensurePolicy: func() error { return nil },
+		now:          func() time.Time { return time.Date(2026, 10, 7, 12, 0, 0, 0, time.UTC) },
+		interrupt:    func(ctx context.Context) (context.Context, context.CancelFunc) { return context.WithCancel(ctx) },
 	}
 	return te
 }

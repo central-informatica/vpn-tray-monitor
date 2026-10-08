@@ -116,3 +116,57 @@ func TestLoopRunFailsAlone(t *testing.T) {
 		t.Fatalf("código %d", c)
 	}
 }
+
+// A política do SCM é contrato com o spec (§9) e com o roteiro e2e, que a
+// confere no registro depois de instalar o MSI.
+func TestPolicyValues(t *testing.T) {
+	want := []time.Duration{5 * time.Second, 30 * time.Second, 60 * time.Second}
+	if got := RecoveryDelays(); !reflect.DeepEqual(got, want) {
+		t.Fatalf("RecoveryDelays %v", got)
+	}
+	if RecoveryReset != 24*time.Hour || PreshutdownTimeout != 15*time.Second {
+		t.Fatalf("reset %s, preshutdown %s", RecoveryReset, PreshutdownTimeout)
+	}
+	if got := Dependencies(); !reflect.DeepEqual(got, []string{"RasMan"}) {
+		t.Fatalf("Dependencies %v", got)
+	}
+	// Quem chama não altera a política de todos.
+	RecoveryDelays()[0] = 0
+	Dependencies()[0] = "x"
+	if RecoveryDelays()[0] != 5*time.Second || Dependencies()[0] != "RasMan" {
+		t.Fatal("política mutável por quem chama")
+	}
+}
+
+func TestDiffPolicy(t *testing.T) {
+	want := WantedPolicy()
+	if len(want.Actions) != 3 || !want.Actions[0].Restart || want.Actions[2].Delay != 60*time.Second ||
+		want.Reset != 24*time.Hour || !want.NonCrash || want.Preshutdown != 15*time.Second {
+		t.Fatalf("WantedPolicy %+v", want)
+	}
+	mod := func(f func(*Policy)) Policy {
+		p := WantedPolicy()
+		f(&p)
+		return p
+	}
+	cases := []struct {
+		name string
+		cur  Policy
+		want PolicyChanges
+	}{
+		{"igual: nada a gravar (não zera a contagem de falhas)", WantedPolicy(), PolicyChanges{}},
+		{"serviço recém-registrado (MSI)", Policy{}, PolicyChanges{true, true, true}},
+		{"espera diferente", mod(func(p *Policy) { p.Actions[1].Delay = 10 * time.Second }), PolicyChanges{Recovery: true}},
+		{"ação que não reinicia", mod(func(p *Policy) { p.Actions[2].Restart = false }), PolicyChanges{Recovery: true}},
+		{"ação a mais", mod(func(p *Policy) { p.Actions = append(p.Actions, RecoveryStep{true, time.Minute}) }), PolicyChanges{Recovery: true}},
+		{"reset diferente", mod(func(p *Policy) { p.Reset = 0 }), PolicyChanges{Recovery: true}},
+		{"sem falha sem crash", mod(func(p *Policy) { p.NonCrash = false }), PolicyChanges{NonCrash: true}},
+		{"preshutdown padrão (3 min)", mod(func(p *Policy) { p.Preshutdown = 3 * time.Minute }), PolicyChanges{Preshutdown: true}},
+	}
+	for _, c := range cases {
+		got := DiffPolicy(c.cur, WantedPolicy())
+		if got != c.want || got.Any() != (c.want != PolicyChanges{}) {
+			t.Errorf("%s: %+v, quer %+v", c.name, got, c.want)
+		}
+	}
+}

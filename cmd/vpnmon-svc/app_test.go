@@ -723,3 +723,60 @@ func TestCmdRunStopsOnInterrupt(t *testing.T) {
 		t.Fatalf("log ainda aberto ou ausente: %v", err)
 	}
 }
+
+// Na partida como serviço, a política do SCM é reaplicada uma vez; se falhar,
+// vira aviso no Event Log e o serviço sobe assim mesmo.
+func TestServiceMainEnsuresSCMPolicy(t *testing.T) {
+	te := newTestEnv(t)
+	te.writeConfig(t, "Matriz")
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	events := &logging.RecordingSink{}
+	p := testPlatform(fake.NewRAS("VPN Matriz"), events, &fake.ACL{})
+	p.Listen = func() (net.Listener, error) { return ln, nil }
+	te.platform = func() (Platform, error) { return p, nil }
+	te.isService = func() (bool, error) { return true, nil }
+	var calls atomic.Int32
+	te.ensurePolicy = func() error { calls.Add(1); return errors.New("acesso negado") }
+	te.runService = func(h svc.Hooks) error {
+		reqs := make(chan svc.Request)
+		finished := make(chan uint32, 1)
+		go func() { finished <- svc.Loop(h, reqs, func(svc.State) {}) }()
+		waitFor(t, func() bool { return hasEvent(events.Snapshot(), "info", "iniciado") })
+		reqs <- svc.Request{Cmd: svc.CmdStop}
+		if code := <-finished; code != 0 {
+			t.Errorf("laço saiu com %d", code)
+		}
+		return nil
+	}
+	if rc := te.run(); rc != 0 {
+		t.Fatalf("saída %d", rc)
+	}
+	if calls.Load() != 1 {
+		t.Fatalf("EnsurePolicy chamado %d vezes", calls.Load())
+	}
+	if !hasEvent(events.Snapshot(), "warning", "acesso negado") {
+		t.Fatalf("Event Log: %+v", events.Snapshot())
+	}
+}
+
+// A política vem antes de qualquer outra coisa: com a plataforma falhando
+// (o Run sai com erro e o SCM precisa da recuperação), ela já foi aplicada.
+func TestServiceMainEnsuresPolicyBeforeStartupFails(t *testing.T) {
+	te := newTestEnv(t)
+	te.isService = func() (bool, error) { return true, nil }
+	te.platform = func() (Platform, error) { return Platform{}, errors.New("RAS indisponível") }
+	var calls atomic.Int32
+	te.ensurePolicy = func() error { calls.Add(1); return nil }
+	var code uint32
+	te.runService = func(h svc.Hooks) error {
+		code = svc.Loop(h, make(chan svc.Request), func(svc.State) {})
+		return nil
+	}
+	te.run()
+	if code == 0 || calls.Load() != 1 {
+		t.Fatalf("laço %d, EnsurePolicy chamado %d vezes", code, calls.Load())
+	}
+}

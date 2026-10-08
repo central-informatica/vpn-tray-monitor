@@ -429,6 +429,11 @@ func serviceMain(e env) int {
 	var resuming atomic.Bool
 	err := e.runService(svc.Hooks{
 		Run: func(ctx context.Context) error {
+			// Primeiro de tudo: o MSI só registra o serviço (a tabela de
+			// recuperação do Windows Installer não funciona), então a
+			// política vem daqui — e tem de valer mesmo que a partida falhe
+			// logo abaixo, para o SCM reiniciar o serviço. Falha é aviso.
+			policyErr := e.ensurePolicy()
 			l, err := paths(e)
 			if err != nil {
 				return err
@@ -436,6 +441,9 @@ func serviceMain(e env) int {
 			p, err := e.platform()
 			if err != nil {
 				return err
+			}
+			if policyErr != nil {
+				p.Events.Warning("aplicando a política de recuperação e de preshutdown do serviço: " + policyErr.Error())
 			}
 			return serve(ctx, p, l, shared.RealClock{}, orch.Store)
 		},

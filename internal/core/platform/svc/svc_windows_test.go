@@ -10,7 +10,9 @@ import (
 	"reflect"
 	"testing"
 	"time"
+	"unsafe"
 
+	"golang.org/x/sys/windows"
 	"golang.org/x/sys/windows/svc"
 	"golang.org/x/sys/windows/svc/mgr"
 )
@@ -85,6 +87,9 @@ func TestWindowsInstallStartPIDUninstall(t *testing.T) {
 	if f, err := s.RecoveryActionsOnNonCrashFailures(); err != nil || !f {
 		t.Fatalf("flag de falhas sem crash: %v (%v)", f, err)
 	}
+	if ms := preshutdownMs(t, s); ms != uint32(PreshutdownTimeout/time.Millisecond) {
+		t.Fatalf("preshutdown %d ms", ms)
+	}
 	if err := s.Start(); err != nil {
 		t.Fatal(err)
 	}
@@ -141,5 +146,78 @@ func TestWindowsInstallRecordsRasManDependency(t *testing.T) {
 	}
 	if !reflect.DeepEqual(cfg.Dependencies, []string{"RasMan"}) {
 		t.Fatalf("dependências %v", cfg.Dependencies)
+	}
+}
+
+// preshutdownMs lê o prazo de preshutdown gravado no SCM.
+func preshutdownMs(t *testing.T, s *mgr.Service) uint32 {
+	t.Helper()
+	var info struct{ PreshutdownTimeout uint32 }
+	var needed uint32
+	if err := windows.QueryServiceConfig2(s.Handle, windows.SERVICE_CONFIG_PRESHUTDOWN_INFO,
+		(*byte)(unsafe.Pointer(&info)), uint32(unsafe.Sizeof(info)), &needed); err != nil {
+		t.Fatal(err)
+	}
+	return info.PreshutdownTimeout
+}
+
+// Só no job Windows (exige elevação): um serviço registrado sem a política
+// (como o MSI faz) a ganha inteira com EnsurePolicy, e reaplicar não falha.
+func TestWindowsEnsurePolicyRepairs(t *testing.T) {
+	if !IsElevated() {
+		t.Skip("exige processo elevado (o runner do CI é)")
+	}
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	name := fmt.Sprintf("VPNMonitorPol%d", os.Getpid())
+	m, err := mgr.Connect()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer m.Disconnect()
+	s, err := m.CreateService(name, exe, mgr.Config{DisplayName: name, StartType: mgr.StartManual})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	t.Cleanup(func() { _ = s.Delete() })
+	if acts, _ := s.RecoveryActions(); len(acts) != 0 {
+		t.Fatalf("serviço novo já com recuperação: %v", acts)
+	}
+	for i := 0; i < 2; i++ {
+		if err := ensurePolicyNamed(name); err != nil {
+			t.Fatalf("EnsurePolicy (%d): %v", i+1, err)
+		}
+	}
+	acts, err := s.RecoveryActions()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var delays []time.Duration
+	for _, a := range acts {
+		if a.Type != mgr.ServiceRestart {
+			t.Fatalf("ação %v, quer reiniciar", a)
+		}
+		delays = append(delays, a.Delay)
+	}
+	if !reflect.DeepEqual(delays, RecoveryDelays()) {
+		t.Fatalf("esperas %v", delays)
+	}
+	if rp, err := s.ResetPeriod(); err != nil || rp != uint32(RecoveryReset.Seconds()) {
+		t.Fatalf("ResetPeriod %d (%v)", rp, err)
+	}
+	if f, err := s.RecoveryActionsOnNonCrashFailures(); err != nil || !f {
+		t.Fatalf("flag de falhas sem crash: %v (%v)", f, err)
+	}
+	if ms := preshutdownMs(t, s); ms != uint32(PreshutdownTimeout/time.Millisecond) {
+		t.Fatalf("preshutdown %d ms", ms)
+	}
+	if ch := DiffPolicy(readPolicy(s), WantedPolicy()); ch.Any() {
+		t.Fatalf("política lida diverge depois do EnsurePolicy: %+v", ch)
+	}
+	if err := ensurePolicyNamed("VPNMonitorInexistente"); err == nil {
+		t.Fatal("serviço inexistente deveria dar erro")
 	}
 }
