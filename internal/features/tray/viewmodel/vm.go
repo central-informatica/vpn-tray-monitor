@@ -21,6 +21,15 @@ const (
 	balloonWindow = 1500 * time.Millisecond
 )
 
+// Idade máxima da lista de entradas RAS (submenu "Adicionar VPN"): ao abrir
+// o menu, um resultado mais velho que RasMenuMaxAge pede outro (o menu que
+// abre agora usa o que já havia); o tique pede a cada RasTickMaxAge. Assim
+// uma entrada criada ou removida no Windows aparece sem reiniciar a bandeja.
+const (
+	RasMenuMaxAge = 30 * time.Second
+	RasTickMaxAge = 60 * time.Second
+)
+
 // BalloonKind escolhe o ícone do balão.
 type BalloonKind int
 
@@ -70,6 +79,7 @@ type VM struct {
 	cfg           ipc.ConfigStatus
 	ras           []ipc.RasEntry
 	rasLoaded     bool
+	rasAt         time.Time // último resultado de listRasEntries (sucesso ou falha)
 	pending       []ipc.NoticeEvent
 	pendingSince  time.Time // chegada do aviso pendente mais antigo
 	clock         func() time.Time
@@ -90,7 +100,7 @@ func (vm *VM) Apply(ev client.Event) {
 		// fica: o snapshot o traz de novo (Snapshot.Config) e, se não trouxer,
 		// o último aviso conhecido continua valendo.
 		vm.hasSnapshot = false
-		vm.vpns, vm.ras, vm.rasLoaded = nil, nil, false
+		vm.vpns, vm.ras, vm.rasLoaded, vm.rasAt = nil, nil, false, time.Time{}
 		vm.pending = nil
 	case client.EvSnapshot:
 		vm.hasSnapshot = true
@@ -204,7 +214,23 @@ func (vm *VM) TakeBalloon(now time.Time) (Balloon, bool) {
 
 // SetRasEntries guarda a resposta de listRasEntries.
 func (vm *VM) SetRasEntries(entries []ipc.RasEntry) {
-	vm.ras, vm.rasLoaded = slices.Clone(entries), true
+	vm.ras, vm.rasLoaded, vm.rasAt = slices.Clone(entries), true, vm.clock()
+}
+
+// RasFailed registra que listRasEntries falhou: a lista anterior (se havia)
+// continua, e a próxima tentativa espera a idade máxima como um sucesso.
+func (vm *VM) RasFailed() {
+	vm.rasAt = vm.clock()
+}
+
+// RasRefreshDue diz se é hora de pedir listRasEntries de novo: só com o
+// serviço conectado e o snapshot recebido, e quando o último resultado tem
+// mais de maxAge (ou não há resultado desde a conexão).
+func (vm *VM) RasRefreshDue(now time.Time, maxAge time.Duration) bool {
+	if vm.conn.State != client.Connected || !vm.hasSnapshot {
+		return false
+	}
+	return vm.rasAt.IsZero() || now.Sub(vm.rasAt) > maxAge
 }
 
 // Names são os nomes das VPNs conhecidas, na ordem do serviço.

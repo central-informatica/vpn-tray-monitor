@@ -331,6 +331,50 @@ func TestAddEntries(t *testing.T) {
 	}
 }
 
+func TestRasRefreshDue(t *testing.T) {
+	vm := New("2.0.0")
+	if vm.RasRefreshDue(now, RasMenuMaxAge) {
+		t.Fatal("sem conexão não pede a lista")
+	}
+	connected(vm)
+	if !vm.RasRefreshDue(now, RasMenuMaxAge) {
+		t.Fatal("conectado e sem resultado: pede")
+	}
+	vm.SetRasEntries([]ipc.RasEntry{{Name: "P&D"}}) // relógio do VM em now
+	if vm.RasRefreshDue(now.Add(RasMenuMaxAge), RasMenuMaxAge) {
+		t.Fatal("resultado com 30 s ainda vale para o menu")
+	}
+	if !vm.RasRefreshDue(now.Add(RasMenuMaxAge+time.Second), RasMenuMaxAge) {
+		t.Fatal("resultado com mais de 30 s: menu pede de novo")
+	}
+	if vm.RasRefreshDue(now.Add(RasTickMaxAge), RasTickMaxAge) || !vm.RasRefreshDue(now.Add(RasTickMaxAge+time.Second), RasTickMaxAge) {
+		t.Fatal("tique: só com mais de 60 s")
+	}
+	// Uma falha também conta como resultado: não repete a cada tique.
+	later := now.Add(10 * time.Minute)
+	vm.clock = func() time.Time { return later }
+	vm.RasFailed()
+	if vm.RasRefreshDue(later.Add(RasTickMaxAge), RasTickMaxAge) {
+		t.Fatal("falha recente não pede de novo")
+	}
+	if m := vm.Model(later); len(m.AddEntries) != 1 {
+		t.Fatalf("falha mantém a última lista: %+v", m)
+	}
+	// Antes do snapshot e sem conexão não pede; ao reconectar, pede já.
+	vm.Apply(client.Event{Kind: client.EvConn, Conn: client.Conn{State: client.Connected}})
+	if vm.RasRefreshDue(later, RasMenuMaxAge) {
+		t.Fatal("antes do snapshot não pede")
+	}
+	vm.Apply(client.Event{Kind: client.EvSnapshot})
+	if !vm.RasRefreshDue(later, RasMenuMaxAge) {
+		t.Fatal("reconectou: a lista anterior não vale")
+	}
+	vm.Apply(client.Event{Kind: client.EvConn, Conn: client.Conn{State: client.Unavailable}})
+	if vm.RasRefreshDue(later.Add(time.Hour), RasTickMaxAge) {
+		t.Fatal("desconectado não pede")
+	}
+}
+
 func TestAbout(t *testing.T) {
 	vm := New("2.1.0")
 	if got := vm.About(client.Stats{}); got != "VPN Monitor\nBandeja: 2.1.0\nServiço: não conectado" {

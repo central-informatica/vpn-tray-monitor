@@ -52,6 +52,11 @@ type Tray struct {
 	iconOK, tipOK bool
 	settings      *settingsWin
 	logs          *logWin
+	// rasBusy: há um listRasEntries em andamento (não pede outro). rasGen
+	// muda a cada evento de conexão: a resposta de um pedido feito antes de
+	// reconectar é descartada (o VM já esqueceu aquela lista).
+	rasBusy bool
+	rasGen  int
 }
 
 var iconNames = map[viewmodel.Icon]string{
@@ -92,8 +97,14 @@ func Run(o Options) (int, error) {
 	t.icons, t.dpi = icons, dpi
 	// O menu é montado na hora de abrir: um menu aberto não se redesenha
 	// sozinho, e assim os tempos relativos saem sempre atuais.
+	// A lista do "Adicionar VPN" velha é pedida de novo em segundo plano;
+	// o menu que abre agora usa a que já havia.
 	ni.ShowingContextMenu().Attach(func() bool {
-		t.buildMenu(t.vm.Model(time.Now()))
+		now := time.Now()
+		if t.vm.RasRefreshDue(now, viewmodel.RasMenuMaxAge) {
+			t.refreshRasEntries()
+		}
+		t.buildMenu(t.vm.Model(now))
 		return true
 	})
 	m := t.vm.Model(time.Now())
@@ -165,7 +176,8 @@ func (t *Tray) pump(stop <-chan struct{}) {
 
 // tick atualiza tooltip e ícone a cada segundo (tempos relativos, §7) e
 // entrega o balão pendente: o VM só o solta depois da janela de agregação,
-// então é o tique, não a chegada do aviso, que o mostra.
+// então é o tique, não a chegada do aviso, que o mostra. Também renova a
+// lista de entradas RAS quando ela passa de RasTickMaxAge (só conectado).
 func (t *Tray) tick(stop <-chan struct{}) {
 	tk := time.NewTicker(time.Second)
 	defer tk.Stop()
@@ -179,6 +191,9 @@ func (t *Tray) tick(stop <-chan struct{}) {
 				if b, ok := t.vm.TakeBalloon(now); ok {
 					t.showBalloon(b)
 				}
+				if t.vm.RasRefreshDue(now, viewmodel.RasTickMaxAge) {
+					t.refreshRasEntries()
+				}
 				t.render(t.vm.Model(now), false)
 			})
 		}
@@ -186,6 +201,9 @@ func (t *Tray) tick(stop <-chan struct{}) {
 }
 
 func (t *Tray) apply(ev client.Event) {
+	if ev.Kind == client.EvConn {
+		t.rasGen++
+	}
 	t.vm.Apply(ev)
 	t.render(t.vm.Model(time.Now()), false)
 	if ev.Kind == client.EvSnapshot {
@@ -268,11 +286,23 @@ func (t *Tray) do(c viewmodel.Command) {
 	})
 }
 
+// refreshRasEntries pede listRasEntries fora da thread da interface (call) e
+// guarda o resultado nela; um pedido por vez.
 func (t *Tray) refreshRasEntries() {
+	if t.rasBusy {
+		return
+	}
+	t.rasBusy = true
+	gen := t.rasGen
 	var r ipc.RasEntries
 	t.call(viewmodel.ListRasEntries(), &r, func(err error) {
+		t.rasBusy = false
+		if gen != t.rasGen {
+			return
+		}
 		if err != nil {
 			t.o.Log.Warn("listando entradas RAS", "erro", err)
+			t.vm.RasFailed()
 			return
 		}
 		t.vm.SetRasEntries(r.Entries)
