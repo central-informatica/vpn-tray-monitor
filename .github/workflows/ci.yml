@@ -1,0 +1,55 @@
+# CI mínimo do Marco A: lint, testes no Linux com -race e testes no Windows
+# (inclui os testes de integração *_windows_test.go). O CI completo
+# (golangci-lint, govulncheck, cobertura, build do MSI, e2e) vem no Marco C.
+name: ci
+
+on:
+  push:
+    branches: [main, "feat/**"]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      - run: make lint
+
+  test-linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      - run: go test -race -shuffle=on ./...
+
+  test-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      # -race exige cgo: usa o gcc MinGW que o runner já traz.
+      - name: go test -race (inclui integração Windows)
+        shell: bash
+        env:
+          CGO_ENABLED: "1"
+        run: go test -race ./...
+      # Produção é sem cgo.
+      - name: build sem cgo
+        shell: bash
+        env:
+          CGO_ENABLED: "0"
+        run: go build -trimpath -o vpnmon-svc.exe ./cmd/vpnmon-svc
