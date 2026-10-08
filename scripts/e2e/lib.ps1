@@ -121,7 +121,8 @@ function Invoke-Sc {
 # Assert-ServicePolicy confere a política que o serviço aplica na partida
 # (svc.EnsurePolicy): recuperação 5/30/60 s zerando em 1 dia, também em
 # falha sem crash, e preshutdown de 15 s. Duas fontes: o registro do serviço
-# e o próprio SCM pelo sc.exe (qfailure, qfailureflag, qpreshutdown).
+# e o próprio SCM pelo sc.exe (qfailure, qfailureflag; o preshutdown só pelo
+# registro).
 function Assert-ServicePolicy {
     Wait-Until -TimeoutSeconds 30 -Message 'política do SCM gravada pelo serviço' -Condition {
         $k = Get-ItemProperty $script:ServiceKey -ErrorAction SilentlyContinue
@@ -147,8 +148,8 @@ function Assert-ServicePolicy {
     Assert-That (($scDelays -join ',') -eq '5000,30000,60000') "sc qfailure: RESTART 5000/30000/60000 ms (veio $($scDelays -join ','))"
     $flag = Invoke-Sc @('qfailureflag', 'VPNMonitor')
     Assert-That ($flag -match 'NONCRASH_FAILURES\s*:\s*TRUE') 'sc qfailureflag: TRUE'
-    $pre = Invoke-Sc @('qpreshutdown', 'VPNMonitor')
-    Assert-That ($pre -match 'PRESHUTDOWN[^:\r\n]*:\s*15000\b') 'sc qpreshutdown: 15000 ms'
+    # O sc.exe não tem consulta de preshutdown (qpreshutdown sai com 1639,
+    # comando inexistente): o prazo fica conferido só pelo registro, acima.
 }
 
 # Assert-DataAcl confere a pasta de dados como o MSI (PermissionEx) e o
