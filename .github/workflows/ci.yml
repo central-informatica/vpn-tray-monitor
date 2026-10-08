@@ -1,16 +1,26 @@
-# CI mínimo dos Marcos A e B: lint, testes no Linux com -race (e piso de
-# cobertura do view-model da bandeja) e testes no Windows (inclui os testes de
-# integração *_windows_test.go), com o build dos dois exes. O CI completo
-# (golangci-lint, govulncheck, cobertura, build do MSI, e2e) vem no Marco C.
+# CI completo (spec §10.1). Ordem pensada para falhar cedo: lint e testes em
+# paralelo; build dos exes (Linux, reproduzível) → MSI (Windows, WiX v5) → e2e
+# do MSI (Windows). Também roda toda semana no main (pega vulnerabilidade nova
+# e mudança na imagem do runner) e é chamado pelo release.yml.
 name: ci
 
 on:
   push:
     branches: [main, "feat/**"]
   pull_request:
+  schedule:
+    - cron: "17 6 * * 1" # segunda, 06:17 UTC
+  workflow_dispatch:
+  workflow_call:
+    inputs:
+      version:
+        description: "Versão gravada nos exes (a tag, na release). Vazio: git describe."
+        type: string
+        required: false
+        default: ""
 
 concurrency:
-  group: ci-${{ github.ref }}
+  group: ci-${{ github.ref }}-${{ github.event_name }}
   cancel-in-progress: true
 
 permissions:
@@ -24,7 +34,60 @@ jobs:
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
-      - run: make lint
+      - name: gofmt, go mod tidy, go vet (linux e windows)
+        run: make lint-go
+      - name: golangci-lint (linux)
+        uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
+        with:
+          version: v2.14.0
+      - name: golangci-lint (windows)
+        uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
+        env:
+          GOOS: windows
+        with:
+          version: v2.14.0
+      - name: workflows (actionlint)
+        run: make lint-workflows
+      - name: scripts PowerShell (PSScriptAnalyzer)
+        run: make lint-scripts
+
+  security:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      - name: govulncheck (linux e windows)
+        shell: bash
+        run: |
+          go run golang.org/x/vuln/cmd/govulncheck@v1.8.0 ./...
+          GOOS=windows go run golang.org/x/vuln/cmd/govulncheck@v1.8.0 ./...
+
+  codeql:
+    # No Windows: assim o CodeQL analisa também os arquivos *_windows.go.
+    runs-on: windows-latest
+    permissions:
+      contents: read
+      actions: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      - uses: github/codeql-action/init@24c54180a607b1449ed407dd24f251e4e9147c8d # v4.38.3
+        with:
+          languages: go
+          build-mode: manual
+      - name: build para o CodeQL
+        shell: bash
+        env:
+          CGO_ENABLED: "0"
+        run: go build ./...
+      - uses: github/codeql-action/analyze@24c54180a607b1449ed407dd24f251e4e9147c8d # v4.38.3
+        with:
+          category: go
 
   test-linux:
     runs-on: ubuntu-latest
@@ -34,6 +97,8 @@ jobs:
         with:
           go-version-file: go.mod
       - run: go test -race -shuffle=on ./...
+      - name: cobertura (≥ 80 % no núcleo; resumo no job)
+        run: make cover
       - name: cobertura do view-model da bandeja (≥ 80 %)
         run: make cover-tray
 
@@ -50,14 +115,68 @@ jobs:
         env:
           CGO_ENABLED: "1"
         run: go test -race ./...
-      # Produção é sem cgo. A bandeja leva o manifest (comctl32 v6) e é
-      # windowsgui.
-      - name: build sem cgo
-        shell: bash
+
+  build:
+    # Cross-compile no Linux: o Makefile é o mesmo do desenvolvimento e a
+    # reprodutibilidade (§10.2) é conferida aqui.
+    runs-on: ubuntu-latest
+    outputs:
+      semver: ${{ steps.version.outputs.semver }}
+      product: ${{ steps.version.outputs.product }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0 # git describe precisa das tags
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      - name: versão
+        id: version
+        shell: bash # com pipefail: falha do msiversion derruba o passo
         env:
-          CGO_ENABLED: "0"
+          INPUT_VERSION: ${{ inputs.version }}
         run: |
-          go build -trimpath -o vpnmon-svc.exe ./cmd/vpnmon-svc
-          go run github.com/tc-hib/go-winres@v0.3.3 make --in cmd/vpnmon-tray/winres/winres.json \
-            --out cmd/vpnmon-tray/rsrc --arch amd64
-          go build -trimpath -ldflags "-H windowsgui" -o vpnmon-tray.exe ./cmd/vpnmon-tray
+          v="${INPUT_VERSION:-$(git describe --tags --always)}"
+          echo "VERSION=$v" >> "$GITHUB_ENV"
+          go run ./tools/msiversion -dev "$v" | tee -a "$GITHUB_OUTPUT"
+      - name: exes (go-winres + build reproduzível, conferido duas vezes)
+        run: make repro VERSION="$VERSION"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: binarios
+          path: |
+            build/vpnmon-svc.exe
+            build/vpnmon-tray.exe
+          if-no-files-found: error
+
+  msi:
+    needs: build
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: binarios
+          path: build
+      - name: MSI da versão (sem assinatura)
+        shell: pwsh
+        env:
+          SEMVER: ${{ needs.build.outputs.semver }}
+          PRODUCT: ${{ needs.build.outputs.product }}
+        run: ./scripts/build-msi.ps1 -Semver $env:SEMVER -ProductVersion $env:PRODUCT -BinDir build -OutDir dist
+      - name: MSIs do e2e (0.0.199 e 0.0.299, §10.2)
+        shell: pwsh
+        run: |
+          ./scripts/build-msi.ps1 -Semver 0.0.1 -ProductVersion 0.0.199 -BinDir build -OutDir e2e
+          ./scripts/build-msi.ps1 -Semver 0.0.2 -ProductVersion 0.0.299 -BinDir build -OutDir e2e
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: msi
+          path: dist/*.msi
+          if-no-files-found: error
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: msi-e2e
+          path: e2e/*.msi
+          if-no-files-found: error
+          retention-days: 3
