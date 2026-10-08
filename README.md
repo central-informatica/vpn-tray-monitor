@@ -7,15 +7,25 @@ quedas, túneis zumbis, suspensão e trocas de rede.
 > **Em desenvolvimento (v2).** O desenho completo está em
 > [`docs/superpowers/specs/2026-10-07-vpn-monitor-v2-design.md`](docs/superpowers/specs/2026-10-07-vpn-monitor-v2-design.md).
 > Marco A (núcleo e serviço): serviço instalável por `vpnmon-svc install` e
-> operado pela CLI. A bandeja (Marco B) e o MSI/CI completo (Marco C) vêm depois.
+> operado pela CLI. Marco B: a bandeja `vpnmon-tray.exe`. O MSI/CI completo
+> (Marco C) vem depois.
 
 ## Desenvolvimento
 
 ```sh
-make lint    # gofmt, go mod tidy, go vet (linux e windows)
-make test    # go test -race -shuffle=on ./...
-make build   # build/vpnmon-svc.exe (GOOS=windows, CGO_ENABLED=0)
+make lint        # gofmt, go mod tidy, go vet (linux e windows)
+make test        # go test -race -shuffle=on ./...
+make cover-tray  # cobertura do view-model da bandeja (mínimo 80 %)
+make build       # build/vpnmon-svc.exe e build/vpnmon-tray.exe (GOOS=windows, CGO_ENABLED=0)
 ```
+
+O `make build` roda antes o `make winres`, que gera
+`cmd/vpnmon-tray/rsrc_windows_amd64.syso` (manifest com comctl32 v6, que o
+walk exige, ícone e versão) com o `go-winres` v0.3.3 a partir de
+`cmd/vpnmon-tray/winres/winres.json`. Sem o `.syso` a bandeja compila, mas
+não abre. O `go run …@v0.3.3` baixa o go-winres pela rede na primeira vez
+(depois fica no cache de módulos do Go). Os ícones em `assets/` saem de
+`go run ./tools/geniconos`.
 
 Toda a lógica roda e é testada no Linux com fakes (`internal/core/platform/fake`);
 os testes `*_windows_test.go` rodam no job Windows do CI.
@@ -46,3 +56,14 @@ próxima partida do serviço, vai inteira para o lado
 
 A CLI elevada não tem esse problema: ela faz o próprio processo criar arquivos
 com dono Administradores antes de gravar.
+
+## Bandeja
+
+`vpnmon-tray.exe` roda uma vez por sessão de usuário (mutex
+`Local\VPNMonitorTray`) e conversa com o serviço pelo pipe; sem o serviço, o
+ícone fica cinza ("serviço parado") e ela reconecta sozinha. O MSI (Marco C) a
+registra no `HKLM\...\Run`; até lá, abra-a à mão. Pelo menu dá para
+verificar, reconectar, pausar, desativar, remover e adicionar VPNs (a partir
+das entradas RAS de todos os usuários) e, em "Configurações…", editar alvos e
+intervalos. Credenciais continuam só pela CLI de administrador
+(`vpnmon-svc credential set "<vpn>" --user <usuário>`).

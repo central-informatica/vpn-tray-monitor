@@ -2,7 +2,9 @@
 build/
 dist/
 *.exe
+*.syso
 coverage.out
+coverage-tray.out
 
 # Dados locais
 *.log

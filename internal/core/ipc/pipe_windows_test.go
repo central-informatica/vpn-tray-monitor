@@ -89,8 +89,8 @@ func TestWindowsPipePIDCheck(t *testing.T) {
 	}
 	c.Close()
 	other := func() (uint32, error) { return 4, nil }
-	if _, err := dialVerified(ctx, name, other); err == nil {
-		t.Fatal("PID diferente do serviço deve ser recusado")
+	if _, err := dialVerified(ctx, name, other); !errors.Is(err, ErrNotService) {
+		t.Fatalf("PID diferente do serviço deve ser recusado com ErrNotService: %v", err)
 	}
 }
 

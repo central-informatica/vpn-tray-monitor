@@ -249,7 +249,8 @@ fatos que interessam ao usuário:
 
 - "VPN X caiu" — uma vez por queda (do primeiro estado ruim após `Conectada`).
 - "VPN X voltou (fora do ar por 4 min)".
-- "VPN X: credencial rejeitada — rode `vpnmon-svc credential set "X"`".
+- "VPN X: credencial rejeitada — rode `vpnmon-svc credential set "X" --user <usuário>`"
+  (o comando completo: sem `--user` a CLI recusa).
 - "VPN X: erro de configuração: <motivo>".
 
 ### 4.9 Orquestrador e robustez
@@ -403,12 +404,20 @@ Uma mensagem JSON por linha: `{"v":1,"id":"…","type":"…","payload":{…}}`.
   `status`, `checkNow{vpn}`, `reconnect{vpn}`, `pause{vpn, untilUnix|null}`,
   `resume{vpn}`, `setEnabled{vpn, enabled}`, `addVpn{config}`,
   `updateVpn{name, config}`, `removeVpn{name}`, `listRasEntries`,
-  `getConfig`, `setGlobal{notifications, logLevel}`.
+  `getConfig`, `setGlobal{notifications, logLevel}`, `logTail{maxBytes}`
+  (fim do log do serviço como texto, para "Abrir log" da bandeja; limitado
+  ao tamanho máximo de mensagem).
 - **Eventos** (após `subscribe`): `snapshot` completo, depois `vpnState`,
   `notice`, `configStatus`, `serviceStopping`.
 - O `snapshot` e o `vpnState` trazem por VPN: estado, desde quando, última
   verificação, latência, falhas consecutivas, próxima tentativa, contagem de
-  reconexões nas últimas 24 h, último erro (classe, código, mensagem).
+  reconexões nas últimas 24 h, último erro (classe, código, mensagem), pausa
+  (até quando ou indefinida) e `blockedUntilUnix`: numa `CredencialInvalida`
+  restaurada do `state.json` (sem último erro), o fim da janela de bloqueio,
+  quando o serviço tenta de novo sozinho.
+- O `snapshot` traz também `notifications` e `config`, o último
+  `configStatus` (`ok`, mensagem, erros por campo): quem se inscreve depois de
+  um config.json inválido fica sabendo sem esperar o próximo evento.
 
 ## 7. Bandeja (`features/tray`)
 

@@ -545,6 +545,13 @@ func TestRemoveAddAfterWindowStartsFresh(t *testing.T) {
 		t.Fatal(err)
 	}
 	h.clk.Advance(domain.ManualRetryWindow + time.Second)
+	// O salto de 15 min chega ao tique de 5 s do watchResume como uma
+	// suspensão (PowerResume, verificação em +5 s). Se ele correr com o
+	// AddVPN, o supervisor novo fica esperando um tique que o relógio falso
+	// nunca dá: espera a passada terminar (ela rearma o tique) antes.
+	if !h.clk.WaitForDeadline(resumePeriod, time.Second) {
+		t.Fatal("watchResume não rearmou o tique após o salto")
+	}
 	if err := h.o.AddVPN(rawMatriz("Matriz")); err != nil {
 		t.Fatal(err)
 	}
@@ -613,5 +620,37 @@ func TestConfigBackIdenticalClearsRemovedStatus(t *testing.T) {
 	_ = h.o.ReloadFromDisk()
 	for m := range drain(events) {
 		t.Fatalf("recarga repetida publicou %s", m.Type)
+	}
+}
+
+// O estado do config.json vai em todo snapshot: uma bandeja que se inscreve
+// depois do configStatus ruim (ou com o arquivo inválido desde a partida)
+// também mostra o aviso; a recarga válida limpa.
+func TestSnapshotCarriesConfigStatus(t *testing.T) {
+	w := &stubWorld{up: true, network: true}
+	h := newOrch(t, w, cfgWith(vpnNamed("Matriz")), config.State{})
+	h.waitView("Matriz", domain.Conectada)
+	if c := h.o.Status().Config; c == nil || !c.OK {
+		t.Fatalf("partida válida: %+v", c)
+	}
+	h.o.MarkDiskInvalid(errors.New("JSON inválido: unexpected EOF")) // como a montagem faz na partida
+	if c := h.o.Status().Config; c == nil || c.OK || !strings.Contains(c.Message, "unexpected EOF") {
+		t.Fatalf("inválido na partida: %+v", c)
+	}
+	_ = os.WriteFile(h.paths.ConfigFile, []byte(`{"version":2,"vpns":[{"name":"Matriz","rasEntry":"VPN Matriz","check":{"kind":"ping"}}]}`), 0o600)
+	h.o.ReloadFromDisk()
+	events, cancel := h.o.Subscribe()
+	defer cancel()
+	var snap ipc.Snapshot
+	if err := ipc.DecodePayload((<-events).Payload, &snap); err != nil {
+		t.Fatal(err)
+	}
+	if c := snap.Config; c == nil || c.OK || len(c.Fields) == 0 || c.Fields[0].Field != "vpns[0].check.host" {
+		t.Fatalf("snapshot de quem se inscreve depois: %+v", c)
+	}
+	_ = os.WriteFile(h.paths.ConfigFile, []byte(`{"version":2,"vpns":[{"name":"Matriz","rasEntry":"VPN Matriz","check":{"kind":"link"}}]}`), 0o600)
+	h.o.ReloadFromDisk()
+	if c := h.o.Status().Config; c == nil || !c.OK {
+		t.Fatalf("depois de corrigir: %+v", c)
 	}
 }

@@ -14,6 +14,7 @@ import (
 	"github.com/guibsu/vpn-tray-monitor/internal/core/ipc"
 	"github.com/guibsu/vpn-tray-monitor/internal/features/monitor/adapters"
 	"github.com/guibsu/vpn-tray-monitor/internal/features/monitor/domain"
+	"github.com/guibsu/vpn-tray-monitor/internal/shared"
 )
 
 // withClient conecta ao serviço (dial confere o PID do servidor e o
@@ -298,7 +299,7 @@ func cmdCheck(args []string, e env) error {
 		r := adapters.NewChecker(vpn.Check, p.Pinger, nil).Check(ctx)
 		switch {
 		case r.OK:
-			fmt.Fprintf(e.stdout, "%s: enlace de pé; %s %s respondeu em %dms\n", vpn.Name, vpn.Check.Kind, vpn.Check.Host, r.RTT.Milliseconds())
+			fmt.Fprintf(e.stdout, "%s: enlace de pé; %s %s respondeu em %dms\n", vpn.Name, vpn.Check.Kind, vpn.Check.Host, shared.CeilMs(r.RTT))
 		case r.Err != nil:
 			fmt.Fprintf(e.stdout, "%s: enlace de pé; %s %s falhou: %v\n", vpn.Name, vpn.Check.Kind, vpn.Check.Host, r.Err)
 			return errCheckFailed

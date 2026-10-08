@@ -148,6 +148,14 @@ func TestReachOKResetsAndReportsLatency(t *testing.T) {
 	}
 }
 
+func TestReachOKZeroRTTStaysPositive(t *testing.T) {
+	s := st(Conectada, withOp(OpProbeReach))
+	d := Decide(s, Input{Kind: InReachResult, ReachOK: true, RTT: 0}, params(), env(0))
+	if d.Next.LastRTT != time.Microsecond {
+		t.Fatalf("%v", d.Next.LastRTT)
+	}
+}
+
 func dialErr(code uint32) *DialError {
 	return &DialError{Class: ras.Classify(code), Code: code, Message: "msg"}
 }
@@ -175,7 +183,7 @@ func TestDialResults(t *testing.T) {
 	if d.Next.State != CredencialInvalida || d.Next.BlockedFP != "fp1" || d.Next.NextTick != (time.Time{}) {
 		t.Fatalf("691: %+v", d.Next)
 	}
-	if k := noticeKinds(d); len(k) != 1 || k[0] != NoticeCredential || d.Notices[0].Text != "VPN Matriz: credencial rejeitada — rode vpnmon-svc credential set \"Matriz\"" {
+	if k := noticeKinds(d); len(k) != 1 || k[0] != NoticeCredential || d.Notices[0].Text != "VPN Matriz: credencial rejeitada — rode vpnmon-svc credential set \"Matriz\" --user <usuário>" {
 		t.Fatalf("aviso 691: %+v", d.Notices)
 	}
 
