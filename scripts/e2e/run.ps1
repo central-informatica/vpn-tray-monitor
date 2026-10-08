@@ -129,25 +129,28 @@ try {
     Assert-DataAcl
 
     Write-Step '6. Parada em até 10 s, com discagem em curso; nova partida'
-    # A discagem começa quando vence a espera (nextAttemptUnix = T) e, contra o
-    # TEST-NET, leva ~20 s até falhar (aí attempt sobe). Para pegar a discagem
-    # em curso, espera até T+2 s com attempt ainda igual (não falhou), e não
-    # passa de T+10 s (folga antes da falha). Se a tentativa falhar no meio,
-    # recomeça com a nova espera.
-    $script:dialAttempt = -1
-    $script:dialAt = [long]0
+    # A tentativa N arma a espera (nextAttemptUnix = T > 0); quando a discagem
+    # começa, o status passa a nextAttemptUnix = 0 com a mesma tentativa e
+    # estado Reconectando, até a discagem falhar (~20 s contra o TEST-NET) e a
+    # tentativa N+1 armar a próxima espera. Discagem em curso = esse quadro
+    # visto depois de T, numa tentativa cuja espera foi vista armada.
+    $script:armedAttempt = -1
+    $script:armedAt = [long]0
     Wait-Until -TimeoutSeconds 240 -IntervalMs 500 -Message 'discagem em curso' -Condition {
         $m = Get-VpnView -Name 'Matriz'
         $next = Get-NextAttemptUnix -View $m
-        if ($m.attempt -ne $script:dialAttempt -or $next -ne $script:dialAt) {
-            $script:dialAttempt = $m.attempt
-            $script:dialAt = $next
-            Write-Host "tentativa $($m.attempt) arma a próxima discagem para $([DateTimeOffset]::FromUnixTimeSeconds($next).ToString('HH:mm:ss')) UTC ($($m.state))"
+        if ($next -gt 0) {
+            if ($m.attempt -ne $script:armedAttempt -or $next -ne $script:armedAt) {
+                $script:armedAttempt = $m.attempt
+                $script:armedAt = $next
+                Write-Host "tentativa $($m.attempt) arma a próxima discagem para $([DateTimeOffset]::FromUnixTimeSeconds($next).ToString('HH:mm:ss')) UTC ($($m.state))"
+            }
             return $false
         }
         $now = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
-        $inDial = $next -gt 0 -and $now -ge $next + 2 -and $now -le $next + 10
-        if ($inDial) { Write-Host "discagem em curso: $($now - $next) s após o início, attempt $($m.attempt), estado $($m.state)" }
+        $inDial = $script:armedAt -gt 0 -and $m.attempt -eq $script:armedAttempt -and
+            $m.state -eq 'Reconectando' -and $now -ge $script:armedAt
+        if ($inDial) { Write-Host "discagem em curso: $($now - $script:armedAt) s após T, tentativa $($m.attempt), estado $($m.state), nextAttemptUnix 0" }
         $inDial
     }
     $sw = [Diagnostics.Stopwatch]::StartNew()
