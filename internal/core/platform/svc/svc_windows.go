@@ -157,7 +157,7 @@ func applyPolicy(s *mgr.Service) error {
 			actions = append(actions, mgr.RecoveryAction{Type: mgr.ServiceRestart, Delay: a.Delay})
 		}
 		if err := s.SetRecoveryActions(actions, uint32(want.Reset.Seconds())); err != nil {
-			return fmt.Errorf("configurando recuperação: %w", err)
+			errs = append(errs, fmt.Errorf("configurando recuperação: %w", err))
 		}
 	}
 	// Run que termina com erro limpo vira SERVICE_STOPPED com código de saída,
