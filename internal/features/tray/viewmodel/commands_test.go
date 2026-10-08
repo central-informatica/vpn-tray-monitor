@@ -96,6 +96,11 @@ func TestAddFromEntry(t *testing.T) {
 	if utf8.RuneCountInString(n) != 64 || !strings.HasSuffix(n, " (2)") {
 		t.Fatalf("longo duplicado: %q", n)
 	}
+	// Espaço na 64ª runa não fica no fim do nome.
+	sp := strings.Repeat("a", 63) + " b"
+	if n := AddFromEntry(sp, nil).Payload.(ipc.AddVPNRequest).Config.Name; n != strings.Repeat("a", 63) {
+		t.Fatalf("espaço no corte: %q", n)
+	}
 	if probs := config.ValidateVPN(c.Payload.(ipc.AddVPNRequest).Config.Normalize()); len(probs) != 0 {
 		t.Fatalf("inválido: %v", probs)
 	}
@@ -105,9 +110,10 @@ func TestErrorText(t *testing.T) {
 	cases := map[string]error{
 		"Sem conexão com o serviço VPN Monitor.":       client.ErrNotConnected,
 		"O serviço VPN Monitor não respondeu a tempo.": fmt.Errorf("x: %w", context.DeadlineExceeded),
-		"VPN pausada": &ipc.Error{Code: ipc.CodePaused, Message: "VPN pausada"},
-		"internal":    &ipc.Error{Code: ipc.CodeInternal},
-		"disco cheio": errors.New("disco cheio"),
+		"VPN pausada":             &ipc.Error{Code: ipc.CodePaused, Message: "VPN pausada"},
+		"erro interno do serviço": &ipc.Error{Code: ipc.CodeInternal},
+		"erro do serviço (xyz)":   &ipc.Error{Code: "xyz"},
+		"disco cheio":             errors.New("disco cheio"),
 		"credencial já rejeitada; tente novamente em 9 min": fmt.Errorf("w: %w", &ipc.Error{Code: ipc.CodeCredentialRejected, Message: "credencial já rejeitada; tente novamente em 9 min"}),
 	}
 	for want, err := range cases {
@@ -123,6 +129,13 @@ func TestErrorText(t *testing.T) {
 func TestRemoveConfirm(t *testing.T) {
 	got := RemoveConfirm("Matriz")
 	if !strings.Contains(got, `"Matriz"`) || !strings.Contains(got, "credential clear") {
+		t.Fatalf("%q", got)
+	}
+}
+
+func TestRemoveConfirmQuoting(t *testing.T) {
+	got := RemoveConfirm(`A"B\`)
+	if !strings.Contains(got, `credential clear "A\"B\\"`) {
 		t.Fatalf("%q", got)
 	}
 }

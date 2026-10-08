@@ -84,7 +84,7 @@ func AddFromEntry(entry string, existing []string) Command {
 		taken[config.NameKey(n)] = true
 	}
 	base := []rune(strings.TrimSpace(entry))
-	name := clip(base, maxNameRunes)
+	name := strings.TrimSpace(clip(base, maxNameRunes))
 	for i := 2; taken[config.NameKey(name)]; i++ {
 		suffix := fmt.Sprintf(" (%d)", i)
 		name = strings.TrimSpace(clip(base, maxNameRunes-len([]rune(suffix)))) + suffix
@@ -100,6 +100,22 @@ func clip(r []rune, n int) string {
 	return string(r)
 }
 
+// codeText é o texto em português de cada código de erro do protocolo, usado
+// quando o serviço não manda mensagem.
+var codeText = map[string]string{
+	ipc.CodeBadRequest:          "pedido inválido",
+	ipc.CodeUnknownType:         "pedido desconhecido pelo serviço",
+	ipc.CodeIncompatible:        "versões incompatíveis; atualize o VPN Monitor",
+	ipc.CodeNotFound:            "VPN não existe",
+	ipc.CodeInvalidConfig:       "configuração inválida",
+	ipc.CodePaused:              "VPN pausada",
+	ipc.CodeAlreadyReconnecting: "já reconectando",
+	ipc.CodeCredentialRejected:  "credencial rejeitada",
+	ipc.CodeDisabled:            "VPN desativada",
+	ipc.CodeBusy:                "serviço ocupado; tente de novo",
+	ipc.CodeInternal:            "erro interno do serviço",
+}
+
 // ErrorText é a mensagem de um pedido que falhou, para a caixa de aviso.
 func ErrorText(err error) string {
 	var e *ipc.Error
@@ -112,7 +128,10 @@ func ErrorText(err error) string {
 		return "O serviço VPN Monitor não respondeu a tempo."
 	case errors.As(err, &e):
 		if e.Message == "" {
-			return e.Code
+			if t, ok := codeText[e.Code]; ok {
+				return t
+			}
+			return "erro do serviço (" + e.Code + ")"
 		}
 		return e.Message
 	}
