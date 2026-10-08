@@ -13,7 +13,7 @@
 [CmdletBinding()]
 param(
     # Versão completa, só para o nome do arquivo (ex.: 2.1.0-rc.1).
-    [Parameter(Mandatory)][string]$Semver,
+    [Parameter(Mandatory)][ValidatePattern('^[0-9A-Za-z.+-]+$')][string]$Semver,
     # ProductVersion do MSI, X.Y.Z (tools/msiversion).
     [Parameter(Mandatory)][ValidatePattern('^\d{1,3}\.\d{1,3}\.\d{1,5}$')][string]$ProductVersion,
     # Pasta com vpnmon-svc.exe e vpnmon-tray.exe.
@@ -32,8 +32,10 @@ function Install-WixIfMissing {
     $current = if ($wix) { (& wix --version 2>$null | Select-Object -Last 1) } else { '' }
     if ($current -notlike "$WixVersion*") {
         Write-Host "instalando WiX $WixVersion"
-        & dotnet tool install --global wix --version $WixVersion
-        if ($LASTEXITCODE -ne 0) { throw "dotnet tool install wix falhou ($LASTEXITCODE)" }
+        # update instala se faltar e troca a versão se houver outra
+        # (--allow-downgrade: sem ele, um WiX 6 global faria o update falhar).
+        & dotnet tool update --global wix --version $WixVersion --allow-downgrade
+        if ($LASTEXITCODE -ne 0) { throw "dotnet tool update wix falhou ($LASTEXITCODE)" }
         $env:PATH = "$env:USERPROFILE\.dotnet\tools;$env:PATH"
     }
     & wix extension add -g "WixToolset.Util.wixext/$WixVersion"
@@ -56,4 +58,7 @@ Install-WixIfMissing
     -d "BinDir=$bin" `
     -o $out
 if ($LASTEXITCODE -ne 0) { throw "wix build falhou ($LASTEXITCODE)" }
+# O wix build do WiX 5 não roda a validação ICE; ela é feita aqui.
+& wix msi validate $out
+if ($LASTEXITCODE -ne 0) { throw "wix msi validate (ICE) falhou ($LASTEXITCODE)" }
 Write-Host "MSI: $out"

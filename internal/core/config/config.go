@@ -21,6 +21,10 @@ func ContentHash(b []byte) string {
 	return hex.EncodeToString(sum[:])
 }
 
+// DataDirName é o nome da pasta de dados dentro da ProgramData; o serviço e
+// o MSI (Directory DATAFOLDER do installer/Product.wxs) usam o mesmo.
+const DataDirName = "VPNMonitor"
+
 // Version é a única versão de config aceita.
 const Version = 2
 

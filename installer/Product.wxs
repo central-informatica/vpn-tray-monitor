@@ -61,7 +61,11 @@
     <Property Id="PURGE" Secure="yes" />
 
     <!-- Caminho da pasta de dados lembrado no registro: a WixRemoveFoldersEx
-         roda antes do CostFinalize, quando as pastas ainda não resolveram. -->
+         roda antes do CostFinalize, quando as pastas ainda não resolveram.
+         Propriedade de busca tem de ser pública (WIX0012), mas NÃO é Secure:
+         numa desinstalação gerenciada por não administrador, um valor vindo
+         da linha de comando não chega à sequência de execução; e o
+         AppSearch sobrescreve qualquer valor quando o DataDir existe. -->
     <Property Id="VPNMON_DATADIR">
       <RegistrySearch Id="DataDirSearch" Root="HKLM" Key="SOFTWARE\VPNMonitor"
                       Name="DataDir" Type="raw" Bitness="always64" />

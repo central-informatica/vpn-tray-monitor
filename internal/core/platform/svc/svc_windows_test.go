@@ -69,6 +69,9 @@ func TestWindowsInstallStartPIDUninstall(t *testing.T) {
 	if cfg.StartType != mgr.StartAutomatic {
 		t.Fatalf("StartType %d, quer automático", cfg.StartType)
 	}
+	if cfg.ErrorControl != mgr.ErrorNormal {
+		t.Fatalf("ErrorControl %d, quer normal (como o MSI)", cfg.ErrorControl)
+	}
 	acts, err := s.RecoveryActions()
 	if err != nil {
 		t.Fatal(err)

@@ -94,6 +94,7 @@ func installNamed(name, display, exePath string, deps []string, args ...string) 
 		DisplayName:  display,
 		Description:  Description,
 		StartType:    mgr.StartAutomatic,
+		ErrorControl: mgr.ErrorNormal, // igual ao ErrorControl="normal" do MSI
 		Dependencies: deps,
 	}, args...)
 	if err != nil {

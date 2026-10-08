@@ -490,11 +490,26 @@ e os intervalos; os valores omitidos usam os padrões da §5.2.
 
 - Por máquina, x64, Windows 10 1809+/11, Server 2019+.
 - `C:\Program Files\VPN Monitor\` com os dois exes, licença e README.
-- Serviço via `ServiceInstall`/`ServiceControl` nativos; recuperação via
-  `ServiceConfigFailureActions` nativo (reiniciar após 5 s, 30 s, 60 s; zerar
-  em 1 dia); ACL da ProgramData via `PermissionEx` nativo com
-  `Sddl="D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)"` (MsiLockPermissionsEx; o `P`
-  desliga a herança). Event Log via `util:EventSource` (só registro, sem CA).
+- Serviço via `ServiceInstall`/`ServiceControl` nativos (automático,
+  LocalSystem, `ErrorControl` normal, dependência do RasMan). **Recuperação
+  (reiniciar após 5 s, 30 s, 60 s; zerar em 1 dia; também em falha sem crash)
+  e preshutdown de 15 s são aplicados pelo próprio serviço a cada partida
+  (`svc.EnsurePolicy`)**, não pelo MSI: a Microsoft documenta que a tabela
+  `MsiServiceConfigFailureActions` "is not working as expected" (o WiX avisa
+  com WIX1149 ao usar `ServiceConfigFailureActions`), e o `util:ServiceConfig`
+  exigiria custom action e não cobre o flag de falha sem crash nem o
+  preshutdown. ACL da ProgramData via `PermissionEx` nativo com
+  `Sddl="O:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)"` (= `acl.DirSDDL`;
+  MsiLockPermissionsEx; `O:BA` põe Administradores como dono e o `P` desliga a
+  herança). Event Log via `util:EventSource` (só registro, sem CA).
+- `MSIRESTARTMANAGERCONTROL=Disable`: o MSI não fecha a bandeja aberta nas
+  sessões no upgrade/desinstalação; o exe em uso é trocado na reinicialização
+  (msiexec devolve 3010) e o serviço já roda a versão nova.
+- **Limitação conhecida:** se um usuário comum pré-criar
+  `%ProgramData%\VPNMonitor` como junção antes da primeira instalação, o
+  `PermissionEx` do MSI age no destino da junção. Sem custom action própria
+  não há defesa no MSI; o serviço detecta a pasta adulterada na partida e a
+  põe em quarentena (§5.1).
 - **Nenhuma custom action própria.** A única CA usada é a padrão do WiX
   `util:RemoveFolderEx`, condicionada a `PURGE=1` na desinstalação.
 - Bandeja no HKLM `Run`; ela abre no próximo login de cada usuário. O MSI não

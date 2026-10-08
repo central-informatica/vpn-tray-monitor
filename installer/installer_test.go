@@ -105,9 +105,9 @@ func TestPackage(t *testing.T) {
 	if rm != "Disable" {
 		t.Errorf("MSIRESTARTMANAGERCONTROL %q, quer Disable", rm)
 	}
-	if lc := p.one(t, nsWix, "Launch"); !strings.Contains(lc.attr("Condition"), "WINBUILD >= 17763") ||
-		!strings.Contains(lc.attr("Condition"), "VersionNT64") {
-		t.Errorf("condição de SO: %q", lc.attr("Condition"))
+	const osCond = "Installed OR (VersionNT64 AND WINBUILD >= 17763)"
+	if lc := p.one(t, nsWix, "Launch"); lc.attr("Condition") != osCond {
+		t.Errorf("condição de SO %q, quer %q", lc.attr("Condition"), osCond)
 	}
 }
 
@@ -117,6 +117,8 @@ func TestServiceMatchesCode(t *testing.T) {
 	want := map[string]string{
 		"Name": svc.ServiceName, "DisplayName": svc.DisplayName, "Description": svc.Description,
 		"Start": "auto", "Account": "LocalSystem", "Type": "ownProcess", "Vital": "yes",
+		// Igual ao mgr.ErrorNormal de svc.installNamed (vpnmon-svc install).
+		"ErrorControl": "normal",
 	}
 	for k, v := range want {
 		if got := si.attr(k); got != v {
@@ -157,8 +159,8 @@ func TestDataFolderACLMatchesService(t *testing.T) {
 			dataDir = d
 		}
 	}
-	if dataDir.attr("Name") != "VPNMonitor" {
-		t.Fatalf("pasta de dados %q", dataDir.attr("Name"))
+	if dataDir.attr("Name") != config.DataDirName {
+		t.Fatalf("pasta de dados %q, o serviço usa %q", dataDir.attr("Name"), config.DataDirName)
 	}
 }
 
@@ -214,10 +216,16 @@ func TestSeedMatchesService(t *testing.T) {
 func TestPurgeOnlyOnExplicitUninstall(t *testing.T) {
 	root := load(t)
 	rf := root.one(t, nsUtil, "RemoveFolderEx")
-	cond := rf.attr("Condition")
-	for _, part := range []string{"PURGE=1", `REMOVE~="ALL"`, "NOT UPGRADINGPRODUCTCODE"} {
-		if !strings.Contains(cond, part) {
-			t.Errorf("condição do RemoveFolderEx %q sem %q", cond, part)
+	const purgeCond = `PURGE=1 AND REMOVE~="ALL" AND NOT UPGRADINGPRODUCTCODE`
+	if cond := rf.attr("Condition"); cond != purgeCond {
+		t.Errorf("condição do RemoveFolderEx %q, quer %q", cond, purgeCond)
+	}
+	// A propriedade de busca tem de ser pública (WIX0012), mas não Secure:
+	// assim, numa desinstalação gerenciada, a linha de comando do msiexec não
+	// consegue apontar o expurgo para outra pasta.
+	for _, p := range root.all(nsWix, "Property") {
+		if p.attr("Id") == rf.attr("Property") && p.attr("Secure") != "" {
+			t.Errorf("propriedade %s do expurgo não pode ser Secure", p.attr("Id"))
 		}
 	}
 	if rf.attr("On") != "uninstall" {
