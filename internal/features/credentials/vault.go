@@ -24,16 +24,11 @@ import (
 // maxCredentialUnits é UNLEN/PWLEN do lmcons.h.
 const maxCredentialUnits = 256
 
-// unreadableFingerprint é devolvida quando o arquivo existe mas não pôde ser
-// lido: difere de "" (sem credencial / não mudou) para o erro não passar em
-// silêncio como "nada mudou".
-const unreadableFingerprint = "ilegivel"
-
 // entropy é a entropia fixa do app passada à DPAPI.
 var entropy = []byte("VPNMonitor/v2/credenciais")
 
 // FileID deriva o nome do arquivo do nome da VPN, sem permitir caminho:
-// versão saneada (até 32 caracteres [a-z0-9_-]) + 8 hex do hash do nome
+// versão saneada (até 32 caracteres [a-z0-9_-]) + 12 hex do hash do nome
 // sem diferenciar maiúsculas.
 func FileID(name string) string {
 	key := config.NameKey(name)
@@ -50,7 +45,7 @@ func FileID(name string) string {
 		}
 	}
 	sum := sha256.Sum256([]byte(key))
-	return b.String() + "-" + hex.EncodeToString(sum[:4])
+	return b.String() + "-" + hex.EncodeToString(sum[:6])
 }
 
 // Vault é o cofre em disco.
@@ -64,6 +59,24 @@ type record struct {
 	Password string `json:"password"`
 }
 
+// utf16Len conta unidades UTF-16 sem alocar (runa inválida vale U+FFFD, 1).
+func utf16Len(s string) int {
+	n := 0
+	for _, r := range s {
+		if l := utf16.RuneLen(r); l > 0 {
+			n += l
+		} else {
+			n++
+		}
+	}
+	return n
+}
+
+func hashBlob(blob []byte) string {
+	sum := sha256.Sum256(blob)
+	return hex.EncodeToString(sum[:8])
+}
+
 func (v Vault) path(name string) string { return filepath.Join(v.Dir, FileID(name)+".bin") }
 
 // Set grava (ou substitui) a credencial da VPN de forma atômica.
@@ -73,13 +86,14 @@ func (v Vault) Set(name, user string, password shared.Secret) error {
 	}
 	// Limites do RASDIALPARAMSW (UNLEN e PWLEN, em unidades UTF-16): acima
 	// disso a discagem nem poderia ser montada.
-	if n := len(utf16.Encode([]rune(user))); n > maxCredentialUnits {
+	pw := password.Reveal()
+	if n := utf16Len(user); n > maxCredentialUnits {
 		return fmt.Errorf("usuário com %d caracteres; o Windows aceita até %d", n, maxCredentialUnits)
 	}
-	if n := len(utf16.Encode([]rune(password.Reveal()))); n > maxCredentialUnits {
+	if n := utf16Len(pw); n > maxCredentialUnits {
 		return fmt.Errorf("senha com %d caracteres; o Windows aceita até %d", n, maxCredentialUnits)
 	}
-	plain, err := json.Marshal(record{User: user, Password: password.Reveal()})
+	plain, err := json.Marshal(record{User: user, Password: pw})
 	if err != nil {
 		return err
 	}
@@ -96,23 +110,31 @@ func (v Vault) Set(name, user string, password shared.Secret) error {
 
 // Get lê a credencial. ok=false se não houver arquivo.
 func (v Vault) Get(name string) (user string, password shared.Secret, ok bool, err error) {
+	user, password, _, ok, err = v.get(name)
+	return
+}
+
+// get lê a credencial e devolve também a impressão digital do MESMO blob
+// lido (sem segunda leitura do arquivo).
+func (v Vault) get(name string) (user string, password shared.Secret, fp string, ok bool, err error) {
 	blob, err := os.ReadFile(v.path(name))
 	if errors.Is(err, fs.ErrNotExist) {
-		return "", shared.Secret{}, false, nil
+		return "", shared.Secret{}, "", false, nil
 	}
 	if err != nil {
-		return "", shared.Secret{}, false, err
+		return "", shared.Secret{}, "", false, err
 	}
+	fp = hashBlob(blob)
 	plain, err := v.DPAPI.Unprotect(blob, entropy)
 	if err != nil {
-		return "", shared.Secret{}, false, fmt.Errorf("decifrando a credencial de %q: %w", name, err)
+		return "", shared.Secret{}, "", false, fmt.Errorf("decifrando a credencial de %q: %w", name, err)
 	}
 	defer clear(plain)
 	var r record
 	if err := json.Unmarshal(plain, &r); err != nil {
-		return "", shared.Secret{}, false, fmt.Errorf("credencial de %q corrompida", name)
+		return "", shared.Secret{}, "", false, fmt.Errorf("credencial de %q corrompida", name)
 	}
-	return r.User, shared.NewSecret(r.Password), true, nil
+	return r.User, shared.NewSecret(r.Password), fp, true, nil
 }
 
 // Clear apaga a credencial; removed=false se não havia.
@@ -130,19 +152,20 @@ func (v Vault) Has(name string) bool {
 	return err == nil
 }
 
-// Fingerprint é o hash do arquivo da VPN ("" só se não houver arquivo).
-// Muda quando a credencial é regravada, sem revelar nada. Se o arquivo
-// existe mas não pode ser lido, devolve um valor fixo distinto de "".
-func (v Vault) Fingerprint(name string) string {
+// Fingerprint é o hash do arquivo da VPN. exists=false se não há arquivo;
+// err != nil se o arquivo existe mas não pôde ser lido (fp vazio nesse caso).
+// Muda quando a credencial é regravada, sem revelar nada; regravar a mesma
+// senha gera um blob DPAPI novo e portanto conta como mudança (aceitável: é
+// ação explícita do administrador).
+func (v Vault) Fingerprint(name string) (fp string, exists bool, err error) {
 	blob, err := os.ReadFile(v.path(name))
 	if errors.Is(err, fs.ErrNotExist) {
-		return ""
+		return "", false, nil
 	}
 	if err != nil {
-		return unreadableFingerprint
+		return "", true, err
 	}
-	sum := sha256.Sum256(blob)
-	return hex.EncodeToString(sum[:8])
+	return hashBlob(blob), true, nil
 }
 
 // DirFingerprint resume a pasta (nomes, tamanhos, datas) para o observador.

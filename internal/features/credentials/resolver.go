@@ -38,13 +38,13 @@ func (r Resolver) Resolve(_ context.Context, name, entry string) (Resolution, er
 	if err != nil {
 		return Resolution{}, err
 	}
-	user, pw, ok, err := r.Vault.Get(name)
+	user, pw, fp, ok, err := r.Vault.get(name)
 	if err != nil {
 		return Resolution{}, err
 	}
 	if ok {
 		return Resolution{User: user, Password: pw, Saved: saved,
-			Fingerprint: SourceVault + ":" + r.Vault.Fingerprint(name), Source: SourceVault}, nil
+			Fingerprint: SourceVault + ":" + fp, Source: SourceVault}, nil
 	}
 	if saved.HasPassword {
 		return Resolution{Saved: saved, Fingerprint: SourceWindows + ":" + saved.Fingerprint(), Source: SourceWindows}, nil
@@ -52,10 +52,16 @@ func (r Resolver) Resolve(_ context.Context, name, entry string) (Resolution, er
 	return Resolution{Saved: saved, Source: SourceNone}, nil
 }
 
-// Fingerprint identifica a credencial atual sem decifrá-la. "" só quando não
-// há credencial; arquivo do cofre ilegível não vira "".
+// Fingerprint identifica a credencial atual sem decifrá-la. "" significa
+// "sem credencial ou não foi possível ler" e nunca conta como mudança. Se o
+// arquivo do cofre existe mas está ilegível, devolve "" sem cair para a
+// credencial do Windows (simétrico ao Resolve, que dá erro).
 func (r Resolver) Fingerprint(_ context.Context, name, entry string) string {
-	if fp := r.Vault.Fingerprint(name); fp != "" {
+	fp, exists, err := r.Vault.Fingerprint(name)
+	if exists {
+		if err != nil {
+			return ""
+		}
 		return SourceVault + ":" + fp
 	}
 	if saved, err := r.RAS.Saved(entry); err == nil && saved.HasPassword {

@@ -20,7 +20,7 @@ func TestFileIDIsSafe(t *testing.T) {
 	}
 	for in, prefix := range cases {
 		id := FileID(in)
-		if !strings.HasPrefix(id, prefix) || strings.ContainsAny(id, `/\.:`) || len(id) != len(prefix)+8 {
+		if !strings.HasPrefix(id, prefix) || strings.ContainsAny(id, `/\.:`) || len(id) != len(prefix)+12 {
 			t.Errorf("FileID(%q) = %q", in, id)
 		}
 	}
@@ -30,7 +30,7 @@ func TestFileIDIsSafe(t *testing.T) {
 	if FileID("a/b") == FileID("a_b") {
 		t.Error("o hash distingue nomes com a mesma versão saneada")
 	}
-	if long := FileID(strings.Repeat("x", 64)); len(long) != 32+1+8 {
+	if long := FileID(strings.Repeat("x", 64)); len(long) != 32+1+12 {
 		t.Errorf("tamanho %d", len(long))
 	}
 }
@@ -55,9 +55,12 @@ func TestVaultSetGetClear(t *testing.T) {
 	if err != nil || !ok || u != "ana" || pw.Reveal() != "s3nha" {
 		t.Fatalf("%q %v %v", u, ok, err)
 	}
-	fp1 := v.Fingerprint("Matriz")
+	fp1, exists, err := v.Fingerprint("Matriz")
+	if fp1 == "" || !exists || err != nil {
+		t.Fatal("Fingerprint")
+	}
 	_ = v.Set("Matriz", "ana", shared.NewSecret("nova"))
-	if fp1 == "" || v.Fingerprint("Matriz") == fp1 {
+	if fp2, _, _ := v.Fingerprint("Matriz"); fp2 == fp1 {
 		t.Fatal("impressão digital deve mudar ao regravar")
 	}
 	if removed, err := v.Clear("Matriz"); !removed || err != nil || v.Has("Matriz") {
@@ -86,22 +89,35 @@ func TestVaultCorruptBlob(t *testing.T) {
 	}
 }
 
-func TestVaultUnreadableFileIsNotEmptyFingerprint(t *testing.T) {
+func TestVaultUnreadableFileNeverCountsAsChange(t *testing.T) {
 	v := newVault(t)
 	_ = os.MkdirAll(v.Dir, 0o700)
 	// Um diretório no lugar do arquivo: existe, mas a leitura falha.
 	if err := os.Mkdir(filepath.Join(v.Dir, FileID("Matriz")+".bin"), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if fp := v.Fingerprint("Matriz"); fp == "" {
-		t.Fatal("arquivo ilegível não pode virar \"\" (credencial não mudou)")
+	if fp, exists, err := v.Fingerprint("Matriz"); fp != "" || !exists || err == nil {
+		t.Fatalf("Fingerprint ilegível: %q %v %v", fp, exists, err)
 	}
-	res := Resolver{Vault: v, RAS: fake.NewRAS("VPN Matriz")}
+	r := fake.NewRAS("VPN Matriz")
+	r.SetSaved("VPN Matriz", "ana", "marcador")
+	res := Resolver{Vault: v, RAS: r}
 	if _, err := res.Resolve(context.Background(), "Matriz", "VPN Matriz"); err == nil {
 		t.Fatal("Resolve deve propagar o erro de leitura")
 	}
-	if res.Fingerprint(context.Background(), "Matriz", "VPN Matriz") == "" {
-		t.Fatal("Fingerprint do resolver não pode ser \"\" com arquivo ilegível")
+	if fp := res.Fingerprint(context.Background(), "Matriz", "VPN Matriz"); fp != "" {
+		t.Fatalf("cofre ilegível deve dar \"\" (sem mudança), sem cair no Windows: %q", fp)
+	}
+}
+
+func TestResolveFingerprintMatchesFileHash(t *testing.T) {
+	v := newVault(t)
+	_ = v.Set("Matriz", "ana", shared.NewSecret("x"))
+	res := Resolver{Vault: v, RAS: fake.NewRAS("VPN Matriz")}
+	got, err := res.Resolve(context.Background(), "Matriz", "VPN Matriz")
+	fp, _, _ := v.Fingerprint("Matriz")
+	if err != nil || got.Fingerprint != "cofre:"+fp {
+		t.Fatalf("%+v %v", got, err)
 	}
 }
 
