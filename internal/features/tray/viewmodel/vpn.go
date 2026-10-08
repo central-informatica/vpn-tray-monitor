@@ -252,6 +252,11 @@ func details(v ipc.VPNView, now time.Time) []string {
 // antes de uma aspa (interna ou a de fechamento) são dobradas e a aspa
 // interna ganha uma barra.
 func CredentialCommand(vpn string) string {
+	return `vpnmon-svc credential set ` + quoteArg(vpn) + ` --user <usuário>`
+}
+
+// quoteArg põe um argumento entre aspas pelas regras do CRT.
+func quoteArg(vpn string) string {
 	var b strings.Builder
 	slashes := 0
 	for _, r := range vpn {
@@ -267,7 +272,7 @@ func CredentialCommand(vpn string) string {
 		b.WriteRune(r)
 	}
 	b.WriteString(strings.Repeat(`\`, slashes))
-	return `vpnmon-svc credential set "` + b.String() + `" --user <usuário>`
+	return `"` + b.String() + `"`
 }
 
 // vpnItem monta o submenu de uma VPN.
