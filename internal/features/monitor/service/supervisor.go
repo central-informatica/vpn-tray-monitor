@@ -208,8 +208,8 @@ func (s *Supervisor) Run(ctx context.Context) {
 		select {
 		case <-done:
 		case <-time.After(s.deps.StopWait):
-			s.deps.Log.Error("operação não voltou após o cancelamento; abandonada",
-				"vpn", s.vpn.Name, "prazo", s.deps.StopWait)
+			// O logger já vem com vpn=<nome> (logging.ForVPN).
+			s.deps.Log.Error("operação não voltou após o cancelamento; abandonada", "prazo", s.deps.StopWait)
 		}
 	}()
 
