@@ -1,6 +1,7 @@
 package fake
 
 import (
+	"errors"
 	"testing"
 
 	"github.com/guibsu/vpn-tray-monitor/internal/core/platform/ras"
@@ -51,5 +52,41 @@ func TestFakeRASSaved(t *testing.T) {
 	b, _ := f.Saved("Matriz")
 	if a.Fingerprint() == "" || a.Fingerprint() == b.Fingerprint() {
 		t.Fatal("impressão digital deve refletir o marcador")
+	}
+}
+
+func TestFakeRASHangUpAfterFailedDial(t *testing.T) {
+	f := NewRAS("Matriz")
+	f.Script("Matriz", DialOutcome{Code: 691})
+	h, err := f.StartDial(ras.DialRequest{Entry: "Matriz"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := ras.Status{State: ras.StateDisconnected, Code: 691}
+	for i := 0; i < 2; i++ { // o handle segue válido após a falha
+		if st, _ := f.Status(h); st != want && i > 0 {
+			t.Fatalf("status %d: %+v", i, st)
+		}
+	}
+	if err := f.HangUp(h); err != nil {
+		t.Fatal(err)
+	}
+	calls := f.Calls()
+	if len(calls) != 2 || calls[1] != "HangUp Matriz" {
+		t.Fatalf("chamadas: %q", calls)
+	}
+}
+
+func TestFakeRASActiveSortedAndErr(t *testing.T) {
+	f := NewRAS("B", "A")
+	f.SetActive("B")
+	f.SetActive("A")
+	a, _ := f.Active()
+	if len(a) != 2 || a[0].Entry != "A" || a[1].Entry != "B" {
+		t.Fatalf("ordem: %+v", a)
+	}
+	f.SetActiveErr(errors.New("x"))
+	if _, err := f.Active(); err == nil {
+		t.Fatal("esperava erro")
 	}
 }

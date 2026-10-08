@@ -61,9 +61,13 @@ func TestWindowsRealDialAndHangUp(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { _ = c.HangUp(h) }) // também após falha: o handle segue válido até o HangUp
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
-	for ctx.Err() == nil {
+	for {
+		if ctx.Err() != nil {
+			t.Fatal("tempo esgotado sem conectar")
+		}
 		st, err := c.Status(h)
 		if err != nil {
 			t.Fatal(err)

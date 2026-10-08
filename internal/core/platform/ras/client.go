@@ -20,6 +20,9 @@ const (
 )
 
 func (s State) String() string {
+	if s < StateConnecting || s > StateDisconnected {
+		return fmt.Sprintf("State(%d)", int(s))
+	}
 	return [...]string{"conectando", "conectada", "desconectada"}[s]
 }
 
@@ -117,6 +120,8 @@ type Client interface {
 	// Falha imediata vem como *Error.
 	StartDial(req DialRequest) (Handle, error)
 	// Status consulta RasGetConnectStatus; handle inválido = desconectada.
+	// Após um estado final de falha o handle continua válido: quem chama
+	// DEVE chamar HangUp para liberá-lo.
 	Status(h Handle) (Status, error)
 	// HangUp desliga e espera o handle ser liberado.
 	HangUp(h Handle) error

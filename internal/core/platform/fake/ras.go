@@ -5,6 +5,7 @@ package fake
 import (
 	"context"
 	"fmt"
+	"sort"
 	"sync"
 
 	"github.com/guibsu/vpn-tray-monitor/internal/core/platform/ras"
@@ -25,21 +26,28 @@ type fakeDial struct {
 	entry   string
 	outcome DialOutcome
 	polls   int
+	failed  bool // falhou: o handle vale até o HangUp, como no Windows
 }
 
 // RAS é um ras.Client em memória.
 type RAS struct {
-	mu       sync.Mutex
-	entries  []string
-	active   map[string]ras.Handle
-	dials    map[ras.Handle]*fakeDial
-	script   map[string][]DialOutcome
-	saved    map[string]*ras.Saved
-	calls    []string
-	next     ras.Handle
-	watchers []chan struct{}
-	// ActiveErr, se não nil, é devolvido por Active.
-	ActiveErr error
+	mu        sync.Mutex
+	entries   []string
+	active    map[string]ras.Handle
+	dials     map[ras.Handle]*fakeDial
+	script    map[string][]DialOutcome
+	saved     map[string]*ras.Saved
+	calls     []string
+	next      ras.Handle
+	watchers  []chan struct{}
+	activeErr error
+}
+
+// SetActiveErr define o erro devolvido por Active (nil limpa).
+func (f *RAS) SetActiveErr(err error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.activeErr = err
 }
 
 // NewRAS cria o fake com as entradas do catálogo.
@@ -116,13 +124,14 @@ func (f *RAS) Entries() ([]string, error) {
 func (f *RAS) Active() ([]ras.ActiveConn, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	if f.ActiveErr != nil {
-		return nil, f.ActiveErr
+	if f.activeErr != nil {
+		return nil, f.activeErr
 	}
 	var out []ras.ActiveConn
 	for e, h := range f.active {
 		out = append(out, ras.ActiveConn{Handle: h, Entry: e})
 	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Entry < out[j].Entry })
 	return out, nil
 }
 
@@ -154,16 +163,20 @@ func (f *RAS) Status(h ras.Handle) (ras.Status, error) {
 		}
 		return ras.Status{State: ras.StateDisconnected}, nil
 	}
+	if d.failed {
+		return ras.Status{State: ras.StateDisconnected, Code: d.outcome.Code}, nil
+	}
 	if d.polls != 0 {
 		if d.polls > 0 {
 			d.polls--
 		}
 		return ras.Status{State: ras.StateConnecting}, nil
 	}
-	delete(f.dials, h)
 	if d.outcome.Code != 0 {
+		d.failed = true
 		return ras.Status{State: ras.StateDisconnected, Code: d.outcome.Code}, nil
 	}
+	delete(f.dials, h)
 	f.active[d.entry] = h
 	return ras.Status{State: ras.StateConnected}, nil
 }

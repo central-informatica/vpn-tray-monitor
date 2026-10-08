@@ -57,3 +57,9 @@ func TestBuildDialParamsKeepsSavedMarker(t *testing.T) {
 		t.Fatal("sem senha salva a impressão é vazia")
 	}
 }
+
+func TestStateStringOutOfRange(t *testing.T) {
+	if State(9).String() != "State(9)" || State(-1).String() != "State(-1)" {
+		t.Fatal("String fora do intervalo")
+	}
+}

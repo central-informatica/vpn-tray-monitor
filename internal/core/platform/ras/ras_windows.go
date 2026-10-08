@@ -192,7 +192,8 @@ func (c *winClient) StartDial(req DialRequest) (Handle, error) {
 }
 
 func (c *winClient) HangUp(h Handle) error {
-	defer c.release(h)
+	// O buffer do RasDialW só é liberado quando o handle some de fato
+	// (ERROR_INVALID_HANDLE): até lá o rasman ainda pode lê-lo.
 	r, _, _ := procRasHangUpW.Call(uintptr(h))
 	if r != 0 && r != ERROR_NO_CONNECTION && r != ERROR_INVALID_HANDLE {
 		return &Error{Op: "RasHangUpW", Code: uint32(r)}
@@ -201,11 +202,12 @@ func (c *winClient) HangUp(h Handle) error {
 	deadline := time.Now().Add(3 * time.Second)
 	for time.Now().Before(deadline) {
 		if _, code := c.rawStatus(h); code == ERROR_INVALID_HANDLE {
+			c.release(h)
 			return nil
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
-	return &Error{Op: "RasHangUpW (espera)", Code: ERROR_INVALID_HANDLE}
+	return &Error{Op: "RasHangUpW (espera: handle ainda não foi liberado, buffer mantido)", Code: ERROR_INVALID_HANDLE}
 }
 
 func (c *winClient) Saved(entry string) (*Saved, error) {
