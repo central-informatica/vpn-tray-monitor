@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"runtime/debug"
@@ -75,6 +76,33 @@ func (s *Server) defaults() {
 	}
 }
 
+// Recusa por excesso de conexões (busy): no máximo refuseMax recusas em
+// andamento, cada uma esperando até refuseLinger o cliente fechar.
+const (
+	refuseMax    = 8
+	refuseLinger = time.Second
+)
+
+// replyAndClose grava a última mensagem de uma conexão e só fecha depois de
+// ler e descartar o que o cliente mandou, até ele fechar (EOF) ou o prazo.
+// Fechar um socket TCP com dados recebidos e não lidos (o hello do cliente)
+// manda RST, e no Windows o RST descarta no cliente a resposta que ele ainda
+// não leu ("forcibly closed"). No named pipe o CloseHandle não perde o que
+// está no buffer, mas o Server aceita qualquer net.Listener. A leitura começa
+// antes da escrita: num transporte sem buffer (net.Pipe) o cliente só passa a
+// ler depois de terminar de escrever o hello.
+func replyAndClose(c net.Conn, m Message, linger time.Duration) {
+	_ = c.SetDeadline(time.Now().Add(linger))
+	drained := make(chan struct{})
+	go func() {
+		defer close(drained)
+		_, _ = io.Copy(io.Discard, io.LimitReader(c, MaxMessage))
+	}()
+	_ = NewCodec(c).Write(m)
+	<-drained
+	c.Close()
+}
+
 // Espera entre tentativas de Accept após falha transitória (dobra até o teto).
 const (
 	acceptRetryMin = 5 * time.Millisecond
@@ -88,14 +116,18 @@ const (
 func (s *Server) Serve(ctx context.Context, ln net.Listener) error {
 	s.defaults()
 	var (
-		mu    sync.Mutex
-		conns = map[net.Conn]struct{}{}
-		wg    sync.WaitGroup
+		mu       sync.Mutex
+		conns    = map[net.Conn]struct{}{}
+		refusing = map[net.Conn]struct{}{} // recusas (busy) em andamento
+		wg       sync.WaitGroup
 	)
 	closeAll := func() {
 		ln.Close()
 		mu.Lock()
 		for c := range conns {
+			c.Close()
+		}
+		for c := range refusing {
 			c.Close()
 		}
 		mu.Unlock()
@@ -142,18 +174,27 @@ func (s *Server) Serve(ctx context.Context, ln net.Listener) error {
 		// escapa do fechamento em massa.
 		stopping := ctx.Err() != nil
 		full := len(conns) >= s.MaxConns
-		if !full && !stopping {
+		refuse := full && !stopping && len(refusing) < refuseMax
+		switch {
+		case refuse:
+			refusing[c] = struct{}{}
+		case !full && !stopping:
 			conns[c] = struct{}{}
 		}
 		mu.Unlock()
-		if stopping {
-			c.Close()
+		if stopping || (full && !refuse) {
+			c.Close() // parando, ou recusas demais em andamento: fecha sem resposta
 			continue
 		}
 		if full {
-			_ = c.SetWriteDeadline(time.Now().Add(time.Second))
-			_ = NewCodec(c).Write(ErrorMessage("", &Error{Code: CodeBusy, Message: "conexões demais"}))
-			c.Close()
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				replyAndClose(c, ErrorMessage("", &Error{Code: CodeBusy, Message: "conexões demais"}), refuseLinger)
+				mu.Lock()
+				delete(refusing, c)
+				mu.Unlock()
+			}()
 			continue
 		}
 		wg.Add(1)

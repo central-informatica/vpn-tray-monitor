@@ -505,3 +505,57 @@ func TestServerHelloTolerantProtocolRead(t *testing.T) {
 		expectErrorID(t, r, CodeBadRequest, "")
 	})
 }
+
+// pipeListener entrega conexões net.Pipe: síncronas, então o hello do
+// cliente só "chega" se o servidor o ler. Reproduz de forma determinística o
+// que no Windows acontece com TCP: fechar com dados do cliente não lidos (RST)
+// faz o cliente perder a resposta já enviada.
+type pipeListener struct {
+	conns  chan net.Conn
+	closed chan struct{}
+	once   sync.Once
+}
+
+func newPipeListener() *pipeListener {
+	return &pipeListener{conns: make(chan net.Conn), closed: make(chan struct{})}
+}
+
+func (l *pipeListener) Accept() (net.Conn, error) {
+	select {
+	case c := <-l.conns:
+		return c, nil
+	case <-l.closed:
+		return nil, net.ErrClosed
+	}
+}
+func (l *pipeListener) Close() error   { l.once.Do(func() { close(l.closed) }); return nil }
+func (l *pipeListener) Addr() net.Addr { return &net.UnixAddr{Name: "pipe", Net: "pipe"} }
+
+func (l *pipeListener) dial(t *testing.T) net.Conn {
+	t.Helper()
+	cli, srv := net.Pipe()
+	select {
+	case l.conns <- srv:
+	case <-time.After(2 * time.Second):
+		t.Fatal("servidor não aceitou")
+	}
+	t.Cleanup(func() { cli.Close() })
+	return cli
+}
+
+func TestBusyReplyReadsClientHelloBeforeClosing(t *testing.T) {
+	ln := newPipeListener()
+	s := &Server{Backend: &fakeBackend{}, MaxConns: 1, HandshakeTimeout: time.Second, WriteTimeout: time.Second}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- s.Serve(ctx, ln) }()
+	t.Cleanup(func() { cancel(); <-done })
+
+	if _, err := Handshake(ln.dial(t), "x"); err != nil {
+		t.Fatal(err)
+	}
+	var e *Error
+	if _, err := Handshake(ln.dial(t), "x"); !errors.As(err, &e) || e.Code != CodeBusy {
+		t.Fatalf("cliente deve receber busy mesmo mandando hello antes de ler: %v", err)
+	}
+}
