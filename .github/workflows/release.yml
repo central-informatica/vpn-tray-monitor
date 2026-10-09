@@ -70,6 +70,10 @@ jobs:
     outputs:
       # vars do environment só existem nos jobs dele: os seguintes leem daqui.
       signed: ${{ steps.signing.outputs.signed }}
+      # SHA-256 do que sai daqui: o publish confere o que baixou contra eles
+      # antes de gerar SHA256SUMS e atestar.
+      msi_sha256: ${{ steps.hashes.outputs.msi_sha256 }}
+      zip_sha256: ${{ steps.hashes.outputs.zip_sha256 }}
     env:
       SEMVER: ${{ needs.validate.outputs.semver }}
       PRODUCT: ${{ needs.validate.outputs.product }}
@@ -115,6 +119,18 @@ jobs:
           New-Item -ItemType Directory -Force portatil | Out-Null
           Copy-Item build/vpnmon-svc.exe, build/vpnmon-tray.exe, README.md, installer/LICENCA.txt portatil/
           Compress-Archive -Path portatil/* -DestinationPath "dist/VPNMonitor-$env:SEMVER-x64-portatil.zip"
+      - name: SHA-256 dos artefatos publicados
+        id: hashes
+        shell: pwsh
+        run: |
+          $files = @(Get-ChildItem dist -File | Where-Object Extension -In '.msi', '.zip')
+          if ($files.Count -ne 2) { throw "dist deveria ter só o MSI e o zip: $($files.Name -join ', ')" }
+          $msi = (Get-FileHash "dist/VPNMonitor-$env:SEMVER-x64.msi" -Algorithm SHA256).Hash.ToLowerInvariant()
+          $zip = (Get-FileHash "dist/VPNMonitor-$env:SEMVER-x64-portatil.zip" -Algorithm SHA256).Hash.ToLowerInvariant()
+          "msi_sha256=$msi" >> $env:GITHUB_OUTPUT
+          "zip_sha256=$zip" >> $env:GITHUB_OUTPUT
+          Write-Host "$msi  VPNMonitor-$env:SEMVER-x64.msi"
+          Write-Host "$zip  VPNMonitor-$env:SEMVER-x64-portatil.zip"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: release
@@ -205,6 +221,27 @@ jobs:
         with:
           name: notas
           path: notas
+      - name: confere MSI e zip com os hashes do package
+        working-directory: dist
+        env:
+          MSI_SHA256: ${{ needs.package.outputs.msi_sha256 }}
+          ZIP_SHA256: ${{ needs.package.outputs.zip_sha256 }}
+        run: |
+          for h in "$MSI_SHA256" "$ZIP_SHA256"; do
+            if ! [[ "$h" =~ ^[0-9a-f]{64}$ ]]; then
+              echo "::error::hash do package ausente ou inválido: '$h'"
+              exit 1
+            fi
+          done
+          shopt -s nullglob
+          got=(*.msi *.zip)
+          if [ "${#got[@]}" -ne 2 ]; then
+            echo "::error::esperava só o MSI e o zip, veio: ${got[*]}"
+            exit 1
+          fi
+          printf '%s  %s\n' \
+            "$MSI_SHA256" "VPNMonitor-$SEMVER-x64.msi" \
+            "$ZIP_SHA256" "VPNMonitor-$SEMVER-x64-portatil.zip" | sha256sum --check --strict -
       - name: SHA256SUMS
         working-directory: dist
         run: sha256sum -- *.msi *.zip *.cdx.json > SHA256SUMS && cat SHA256SUMS
