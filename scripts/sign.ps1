@@ -18,8 +18,8 @@
                         por exemplo metadata.json com Endpoint, conta e perfil
     SIGN_TIMESTAMP_URL  carimbo de tempo RFC 3161 (signtool /tr)
     SIGN_EXPECTED_SHA1  opcional: thumbprint SHA-1 do certificado esperado;
-                        se definida, a verificação usa /sha1 e recusa
-                        assinatura feita por outro certificado
+                        se definida, o thumbprint do assinante (lido com
+                        Get-AuthenticodeSignature) precisa ser esse
 
   Exemplo do comando que este script monta para cada arquivo:
 
@@ -68,14 +68,20 @@ foreach ($name in 'SIGN_DLIB', 'SIGN_DLIB_METADATA', 'SIGN_TIMESTAMP_URL') {
 }
 
 $signtool = Get-SignTool
-$verifyArgs = @('verify', '/pa', '/v')
-if ($env:SIGN_EXPECTED_SHA1) { $verifyArgs += @('/sha1', $env:SIGN_EXPECTED_SHA1) }
+$expected = if ($env:SIGN_EXPECTED_SHA1) { ($env:SIGN_EXPECTED_SHA1 -replace '\s', '').ToUpperInvariant() } else { '' }
 foreach ($file in $Path) {
     $full = (Resolve-Path $file).Path
     Write-Host "assinando $full"
     & $signtool sign /v /fd SHA256 /td SHA256 /tr $env:SIGN_TIMESTAMP_URL `
         /dlib $env:SIGN_DLIB /dmdf $env:SIGN_DLIB_METADATA $full
     if ($LASTEXITCODE -ne 0) { throw "signtool sign falhou em $full ($LASTEXITCODE)" }
-    & $signtool @verifyArgs $full
+    & $signtool verify /pa /v $full
     if ($LASTEXITCODE -ne 0) { throw "assinatura de $full não confere ($LASTEXITCODE)" }
+    if ($expected) {
+        $cert = (Get-AuthenticodeSignature -LiteralPath $full).SignerCertificate
+        $got = if ($cert) { $cert.Thumbprint.ToUpperInvariant() } else { '(sem certificado)' }
+        if ($got -ne $expected) {
+            throw "certificado inesperado em ${full}: thumbprint $got, esperado $expected (SIGN_EXPECTED_SHA1)"
+        }
+    }
 }
