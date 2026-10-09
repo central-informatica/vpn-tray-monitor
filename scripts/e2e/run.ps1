@@ -252,6 +252,11 @@ try {
     Wait-Until -TimeoutSeconds 30 -Message 'serviço em execução sobre a pasta pré-criada' -Condition {
         (Get-Service VPNMonitor -ErrorAction SilentlyContinue).Status -eq 'Running'
     }
+    # Running é informado antes do EnsureDir (svc.Loop dispara o Run numa
+    # goroutine): esperar a quarentena e a pasta nova aparecerem.
+    Wait-Until -TimeoutSeconds 30 -Message 'quarentena feita e pasta de dados recriada' -Condition {
+        @(Get-QuarantinedDataDir).Count -ge 1 -and (Test-Path $DataDir)
+    }
     $quarantined = @(Get-QuarantinedDataDir)
     Assert-That ($quarantined.Count -eq 1) "pasta pré-criada posta em quarentena ($($quarantined.Name -join ', '))"
     $qOwner = (Get-Acl $quarantined[0].FullName).Owner
