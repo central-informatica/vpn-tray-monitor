@@ -153,8 +153,8 @@
            pré-criou a pasta, ela continua dele, o serviço vê o dono não
            confiável na partida e a põe em quarentena; com O:BA o MSI a
            "lavaria" e um handle com WRITE_DAC aberto antes seguiria valendo.
-           Numa instalação limpa o dono é o do msiexec (SYSTEM ou
-           Administradores), os dois aceitos pelo serviço. -->
+           Numa instalação limpa o dono é o padrão do token do msiexec,
+           SYSTEM (conferido no e2e), aceito pelo serviço. -->
       <Component Id="PastaDados" Directory="DATAFOLDER" Bitness="always64">
         <CreateFolder>
           <PermissionEx Sddl="D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)" />

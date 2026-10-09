@@ -506,9 +506,9 @@ e os intervalos; os valores omitidos usam os padrões da §5.2.
   `%ProgramData%\VPNMonitor`, a pasta continua dele e o serviço a põe em
   quarentena na partida (§5.1); com `O:BA` o MSI a tornaria "confiável" e um
   handle com `WRITE_DAC` aberto antes continuaria valendo. Numa instalação
-  limpa o dono é o dono padrão do token do msiexec (SYSTEM ou
-  Administradores), os dois aceitos pelo serviço, que não o reescreve; quando
-  o serviço recria a pasta, o dono é Administradores. O e2e confere os dois
+  limpa o dono é o dono padrão do token do msiexec, SYSTEM, que o serviço
+  aceita (como Administradores) e não reescreve; quando o serviço recria a
+  pasta, o dono é Administradores. O e2e confere os dois
   casos (§10.3). Event Log via `util:EventSource` (só registro, sem CA).
 - `MSIRESTARTMANAGERCONTROL=Disable`: o MSI não fecha a bandeja aberta nas
   sessões no upgrade/desinstalação; o exe em uso é trocado na reinicialização

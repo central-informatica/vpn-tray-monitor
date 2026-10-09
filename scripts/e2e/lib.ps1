@@ -176,14 +176,16 @@ function Assert-ServicePolicy {
 # Assert-DataAcl confere a pasta de dados como o MSI (PermissionEx, só a
 # DACL) e o serviço (acl.DirSDDL) a deixam: DACL protegida (P) com só SYSTEM
 # e Administradores em controle total, e nada posto em quarentena (acl:
-# <pasta>.naoconfiavel-<data>). Dono SYSTEM ou Administradores: o MSI não
-# define dono (§9), então numa instalação limpa ele é o dono padrão do
-# token do msiexec; o serviço aceita os dois (acl.OwnerTrusted) e não o
-# reescreve; quando recria a pasta (quarentena), o dono é BA.
+# <pasta>.naoconfiavel-<data>). O dono depende de quem criou a pasta: o MSI
+# não define dono (§9), e numa instalação limpa ele é o dono padrão do token
+# do msiexec, SYSTEM (visto no CI); o serviço aceita SY e BA
+# (acl.OwnerTrusted) e não o reescreve. Quando o serviço recria a pasta
+# (quarentena), o dono é BA (acl.DirSDDL).
 function Assert-DataAcl {
+    param([ValidateSet('SY', 'BA')][string]$Owner = 'SY')
     $sddl = (Get-Acl $script:DataDir).GetSecurityDescriptorSddlForm('Owner, Access')
-    $ok = $sddl -match '^O:(SY|BA)D:PA?I?(\(A;OICI;FA;;;SY\)\(A;OICI;FA;;;BA\)|\(A;OICI;FA;;;BA\)\(A;OICI;FA;;;SY\))$'
-    Assert-That $ok "ACL da pasta de dados ($sddl)"
+    $ok = $sddl -match "^O:$($Owner)D:PA?I?(\(A;OICI;FA;;;SY\)\(A;OICI;FA;;;BA\)|\(A;OICI;FA;;;BA\)\(A;OICI;FA;;;SY\))$"
+    Assert-That $ok "ACL da pasta de dados, dono $Owner ($sddl)"
     $quarantined = @(Get-QuarantinedDataDir)
     Assert-That ($quarantined.Count -eq 0) 'o serviço não pôs a pasta de dados em quarentena'
 }

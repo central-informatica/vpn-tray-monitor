@@ -155,7 +155,7 @@ Quem instalou à mão com `vpnmon-svc install` deve rodar
   **sem trocar o dono**. Se um usuário comum a criou antes da instalação, ela
   continua dele e o serviço, na partida, a põe de lado
   (`VPNMonitor.naoconfiavel-*`) e cria outra, vazia. Numa instalação limpa o
-  dono é SYSTEM ou Administradores, ambos aceitos.
+  dono é SYSTEM, aceito pelo serviço.
 - **Fabricante provisório:** "Central Informática" ainda **precisa ser
   confirmado**. Para trocar, edite `installer/Product.wxs` (`<?define
   Manufacturer = … ?>`) e o `CompanyName` de

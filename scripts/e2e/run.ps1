@@ -257,8 +257,11 @@ try {
     $qOwner = (Get-Acl $quarantined[0].FullName).Owner
     Assert-That ($qOwner -like "*\$E2EUser") "a quarentena guarda a pasta do usuário (dono $qOwner)"
     Remove-Item $quarantined[0].FullName -Recurse -Force
-    Assert-DataAcl
-    Assert-That ((Get-Acl $DataDir).GetSecurityDescriptorSddlForm('Owner') -eq 'O:BA') 'pasta recriada pelo serviço com dono Administradores'
+    Assert-DataAcl -Owner BA
+    # O serviço acabou de subir e ainda grava (state.json, log): a
+    # RemoveFolderEx lista os arquivos antes do StopServices, e um arquivo
+    # criado nesse meio impediria apagar a pasta. Parado antes, nada muda.
+    Stop-Service VPNMonitor
     $code = Invoke-Msiexec -Mode '/x' -Msi $NewMsi -LogFile (Join-Path $LogDir 'uninstall-precriada.log') -Properties @('PURGE=1')
     Assert-That ($code -in 0, 3010) "msiexec /x PURGE=1 após a quarentena (código $code)"
     Assert-That (-not (Test-Path $DataDir)) 'PURGE=1 removeu a ProgramData'
