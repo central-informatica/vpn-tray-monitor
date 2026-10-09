@@ -9,6 +9,11 @@
   num prompt de administrador; serve de base para um script de Intune (app
   Win32) ou de inicialização de GPO.
 
+  Contexto não interativo (Intune roda como SYSTEM): com -User e sem
+  -Password o script cai no Read-Host, que não tem console; nesse caso
+  adapte o script para obter a senha de um meio protegido. Nunca a deixe em
+  texto no script, no SYSVOL ou na linha de comando.
+
   A entrada RAS precisa existir para todos os usuários antes:
     Add-VpnConnection -Name "VPN Matriz" -ServerAddress vpn.exemplo -AllUserConnection
 
@@ -25,11 +30,11 @@
 param(
     [Parameter(Mandatory)][string]$Msi,
     # Entrada RAS (VPN_ENTRY).
-    [Parameter(Mandatory)][string]$Entry,
+    [Parameter(Mandatory)][ValidateScript({ $_ -notmatch '"' })][string]$Entry,
     # Nome da VPN no VPN Monitor (VPN_NAME); padrão: igual à entrada.
-    [string]$Name,
+    [ValidateScript({ $_ -notmatch '"' })][string]$Name,
     [ValidateSet('', 'ping', 'tcp', 'link')][string]$CheckKind = '',
-    [string]$CheckHost,
+    [ValidateScript({ $_ -notmatch '"' })][string]$CheckHost,
     [string]$CheckPort,
     [string]$Interval,
     # Usuário da VPN; sem ele, nenhuma credencial é gravada (VPN por
@@ -41,6 +46,12 @@ param(
 
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
+
+# O Intune roda o PowerShell de 32 bits, onde ProgramFiles aponta para
+# "Program Files (x86)"; ProgramW6432 é sempre o de 64 bits.
+$programFiles = if ($env:ProgramW6432) { $env:ProgramW6432 } else { $env:ProgramFiles }
+$svcExe = Join-Path $programFiles 'VPN Monitor\vpnmon-svc.exe'
+$installExit = 0
 
 $principal = New-Object Security.Principal.WindowsPrincipal([Security.Principal.WindowsIdentity]::GetCurrent())
 if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
@@ -59,26 +70,27 @@ $msiArgs = @('/i', "`"$((Resolve-Path $Msi).Path)`"", '/qn', '/norestart', '/l*v
 $p = Start-Process -FilePath 'msiexec.exe' -ArgumentList $msiArgs -Wait -PassThru
 switch ($p.ExitCode) {
     0 { Write-Host 'VPN Monitor instalado' }
-    3010 { Write-Host 'VPN Monitor instalado; a troca de arquivos em uso termina na próxima reinicialização' }
+    3010 { $installExit = 3010; Write-Host 'VPN Monitor instalado; a troca de arquivos em uso termina na próxima reinicialização' }
     default { throw "msiexec saiu com $($p.ExitCode); veja $LogFile" }
 }
 
 $deadline = (Get-Date).AddSeconds(30)
-while ((Get-Service VPNMonitor -ErrorAction SilentlyContinue).Status -ne 'Running') {
+while ($true) {
+    $service = Get-Service VPNMonitor -ErrorAction SilentlyContinue
+    if ($service -and $service.Status -eq 'Running') { break }
     if ((Get-Date) -gt $deadline) { throw 'o serviço VPNMonitor não entrou em execução em 30 s' }
     Start-Sleep -Milliseconds 500
 }
 
 if ($User) {
     if (-not $Password) { $Password = Read-Host -AsSecureString "Senha de $User" }
-    $svc = Join-Path $env:ProgramFiles 'VPN Monitor\vpnmon-svc.exe'
     # UTF-8 no stdin do vpnmon-svc: o Windows PowerShell 5.1 mandaria ASCII
     # e trocaria acentos por "?".
     $OutputEncoding = New-Object System.Text.UTF8Encoding($false)
     $bstr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($Password)
     try {
         [Runtime.InteropServices.Marshal]::PtrToStringBSTR($bstr) |
-            & $svc credential set $Name --user $User --password-stdin
+            & $svcExe credential set $Name --user $User --password-stdin
         if ($LASTEXITCODE -ne 0) { throw "credential set saiu com $LASTEXITCODE" }
     }
     finally {
@@ -86,4 +98,6 @@ if ($User) {
     }
 }
 
-& (Join-Path $env:ProgramFiles 'VPN Monitor\vpnmon-svc.exe') status
+& $svcExe status
+if ($LASTEXITCODE -ne 0) { throw "status saiu com $LASTEXITCODE" }
+exit $installExit

@@ -69,12 +69,20 @@ passos (instalação silenciosa + `credential set` com a senha num
 - **GPO (atribuição de software, computador):** publique o MSI num
   compartilhamento lido pelas contas de computador. Propriedades do seed
   entram por uma transformação (`.mst`, ex.: gerada no Orca) — a GPO não
-  aceita linha de comando. A credencial vai num script de inicialização que
-  roda o `credential set` (ou use VPN por certificado / credencial salva no
-  Windows, que o serviço também usa).
+  aceita linha de comando.
+  **Nunca coloque a senha da VPN em script de inicialização da GPO nem no
+  SYSVOL: qualquer usuário do domínio lê.** Prefira rodar o
+  `credential set` interativamente, num prompt de administrador, ou por uma
+  ferramenta de gestão que entregue o segredo de forma protegida. Se não
+  gravar credencial, o serviço usa a credencial salva no Windows para a
+  entrada RAS (ou o certificado, em VPN por certificado), o que também
+  serve de alternativa.
 - **Intune:** como app de linha de negócios (MSI, com os argumentos acima) ou
   como app Win32 empacotando o `deploy-exemplo.ps1` com o MSI. Detecção pelo
-  código de produto do MSI ou pela chave `HKLM\SOFTWARE\VPNMonitor\Version`.
+  código de produto do MSI ou pelo *valor* `Version` da chave
+  `HKLM\SOFTWARE\VPNMonitor`. O Intune executa o script em 32 bits e como
+  SYSTEM (sem console para pedir senha): o `deploy-exemplo.ps1` resolve o
+  caminho de 64 bits, mas a senha precisa de outro meio (ver o aviso acima).
 
 ### Atualização
 
@@ -108,7 +116,10 @@ número.
 O atalho do menu Iniciar é "anunciado" (do Windows Installer): ao abri-lo,
 o Windows confere os componentes do produto e, se algum sumiu (ex.: alguém
 apagou a origem `VPNMonitor` do Event Log), dispara um reparo do MSI, que
-pede UAC. A bandeja aberta pelo `Run` não passa por isso.
+pode pedir UAC e a mídia (o MSI de origem, se o Windows não o achar no
+cache). O reparo também regrava o seed **vazio**, o que é inofensivo: a
+config existente é preservada. A bandeja aberta pelo `Run` não passa por
+isso.
 
 ### Desinstalação
 
@@ -182,7 +193,7 @@ alvos e intervalos. Credenciais continuam só pela CLI de administrador
 
 | O quê | Onde |
 |---|---|
-| Log do serviço | `%ProgramData%\VPNMonitor\logs\vpnmon.log` (+ `.1` … `.5`); pela bandeja, "Abrir log" |
+| Log do serviço | `%ProgramData%\VPNMonitor\logs\vpnmon.log` (+ `vpnmon.1.log` … `vpnmon.5.log`); pela bandeja, "Abrir log" |
 | Eventos do serviço | Visualizador de Eventos → Aplicativo, origem `VPNMonitor` |
 | Log da bandeja | `%LOCALAPPDATA%\VPNMonitor\vpnmon-tray.log` (por usuário, 1 MB × 3) |
 | Estado atual | `vpnmon-svc status --json` |
