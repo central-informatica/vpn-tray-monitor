@@ -67,9 +67,6 @@ type PolicyChanges struct {
 	Recovery, NonCrash, Preshutdown bool
 }
 
-// Any diz se há algo a gravar.
-func (c PolicyChanges) Any() bool { return c.Recovery || c.NonCrash || c.Preshutdown }
-
 // DiffPolicy compara a política lida do SCM com a desejada. Só o que diverge
 // é regravado: regravar as ações de recuperação zera a contagem de falhas do
 // SCM, e o serviço reaplica a política a cada partida (inclusive logo depois

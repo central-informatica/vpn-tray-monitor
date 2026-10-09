@@ -10,6 +10,7 @@ import (
 
 	"golang.org/x/sys/windows"
 
+	"github.com/guibsu/vpn-tray-monitor/internal/core/config"
 	"github.com/guibsu/vpn-tray-monitor/internal/core/ipc"
 	"github.com/guibsu/vpn-tray-monitor/internal/core/platform/instance"
 	"github.com/guibsu/vpn-tray-monitor/internal/features/tray/client"
@@ -48,11 +49,11 @@ func run() int {
 	return code
 }
 
-// trayLog abre o log em %LOCALAPPDATA%\VPNMonitor; sem a pasta, a bandeja
-// segue sem log (descarta).
+// trayLog abre o log em %LOCALAPPDATA%\VPNMonitor (config.DataDirName); sem
+// a pasta, a bandeja segue sem log (descarta).
 func trayLog() (*slog.Logger, func()) {
 	if dir, err := windows.KnownFolderPath(windows.FOLDERID_LocalAppData, 0); err == nil {
-		if l, closeLog, err := openTrayLog(filepath.Join(dir, "VPNMonitor")); err == nil {
+		if l, closeLog, err := openTrayLog(filepath.Join(dir, config.DataDirName)); err == nil {
 			return l, closeLog
 		}
 	}

@@ -165,7 +165,7 @@ func TestDiffPolicy(t *testing.T) {
 	}
 	for _, c := range cases {
 		got := DiffPolicy(c.cur, WantedPolicy())
-		if got != c.want || got.Any() != (c.want != PolicyChanges{}) {
+		if got != c.want {
 			t.Errorf("%s: %+v, quer %+v", c.name, got, c.want)
 		}
 	}

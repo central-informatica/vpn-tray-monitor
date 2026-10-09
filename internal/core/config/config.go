@@ -22,7 +22,8 @@ func ContentHash(b []byte) string {
 }
 
 // DataDirName é o nome da pasta de dados dentro da ProgramData; o serviço e
-// o MSI (Directory DATAFOLDER do installer/Product.wxs) usam o mesmo.
+// o MSI (Directory DATAFOLDER do installer/Product.wxs) usam o mesmo. A
+// bandeja usa o mesmo nome para a pasta do seu log no %LOCALAPPDATA%.
 const DataDirName = "VPNMonitor"
 
 // Version é a única versão de config aceita.

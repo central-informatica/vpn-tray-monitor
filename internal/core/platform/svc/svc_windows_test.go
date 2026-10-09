@@ -217,7 +217,7 @@ func TestWindowsEnsurePolicyRepairs(t *testing.T) {
 	if ms := preshutdownMs(t, s); ms != uint32(PreshutdownTimeout/time.Millisecond) {
 		t.Fatalf("preshutdown %d ms", ms)
 	}
-	if ch := DiffPolicy(readPolicy(s), WantedPolicy()); ch.Any() {
+	if ch := DiffPolicy(readPolicy(s), WantedPolicy()); ch != (PolicyChanges{}) {
 		t.Fatalf("política lida diverge depois do EnsurePolicy: %+v", ch)
 	}
 	if err := ensurePolicyNamed("VPNMonitorInexistente"); err == nil {

@@ -35,8 +35,10 @@ param(
     [ValidateScript({ $_ -notmatch '"' })][string]$Name,
     [ValidateSet('', 'ping', 'tcp', 'link')][string]$CheckKind = '',
     [ValidateScript({ $_ -notmatch '"' })][string]$CheckHost,
-    [string]$CheckPort,
-    [string]$Interval,
+    # Porta do tcp (CHECK_PORT): 1 a 65535, como o config aceita.
+    [ValidateRange(1, 65535)][int]$CheckPort,
+    # Intervalo em segundos (INTERVAL): 5 a 3600, como o config aceita.
+    [ValidateRange(5, 3600)][int]$Interval,
     # Usuário da VPN; sem ele, nenhuma credencial é gravada (VPN por
     # certificado ou credencial salva no Windows).
     [string]$User,
@@ -59,12 +61,12 @@ if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administra
 }
 if (-not $Name) { $Name = $Entry }
 
-# Propriedades do seed (§5.3); valores com espaço vão entre aspas.
+# Propriedades do seed (§5.3); todos os valores vão entre aspas.
 $props = @("VPN_ENTRY=`"$Entry`"", "VPN_NAME=`"$Name`"")
-if ($CheckKind) { $props += "CHECK_KIND=$CheckKind" }
+if ($CheckKind) { $props += "CHECK_KIND=`"$CheckKind`"" }
 if ($CheckHost) { $props += "CHECK_HOST=`"$CheckHost`"" }
-if ($CheckPort) { $props += "CHECK_PORT=$CheckPort" }
-if ($Interval) { $props += "INTERVAL=$Interval" }
+if ($CheckPort) { $props += "CHECK_PORT=`"$CheckPort`"" }
+if ($Interval) { $props += "INTERVAL=`"$Interval`"" }
 
 $msiArgs = @('/i', "`"$((Resolve-Path $Msi).Path)`"", '/qn', '/norestart', '/l*v', "`"$LogFile`"") + $props
 $p = Start-Process -FilePath 'msiexec.exe' -ArgumentList $msiArgs -Wait -PassThru
