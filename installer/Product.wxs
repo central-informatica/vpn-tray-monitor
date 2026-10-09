@@ -8,11 +8,11 @@
   Regras: nenhuma custom action própria (a única CA é a WixRemoveFoldersEx
   do util:RemoveFolderEx, só com PURGE=1 na desinstalação); nenhuma senha
   em propriedade. Os valores que o código também conhece (nome do serviço,
-  SDDL da pasta, chave do seed, origem do Event Log, prazos do SCM) são
+  DACL da pasta, chave do seed, origem do Event Log, prazos do SCM) são
   conferidos contra as constantes Go por installer/installer_test.go.
 -->
 <!-- Fabricante: A CONFIRMAR com o usuário. Trocar aqui e no CompanyName dos
-     dois cmd/*/winres/winres.json. -->
+     dois cmd/*/winres/winres.json (installer_test.go confere os três). -->
 <?define Manufacturer = "Central Informática" ?>
 <Wix xmlns="http://wixtoolset.org/schemas/v4/wxs"
      xmlns:util="http://wixtoolset.org/schemas/v4/wxs/util">
@@ -147,11 +147,17 @@
     </ComponentGroup>
 
     <ComponentGroup Id="Dados">
-      <!-- Pasta de dados (§5.1): dono Administradores, SYSTEM e
-           Administradores com controle total, herança desligada (P). -->
+      <!-- Pasta de dados (§5.1): SYSTEM e Administradores com controle
+           total, herança desligada (P). Só a DACL (a mesma do acl.DirSDDL),
+           sem "O:": o MSI não pode trocar o dono. Se um usuário comum
+           pré-criou a pasta, ela continua dele, o serviço vê o dono não
+           confiável na partida e a põe em quarentena; com O:BA o MSI a
+           "lavaria" e um handle com WRITE_DAC aberto antes seguiria valendo.
+           Numa instalação limpa o dono é o do msiexec (SYSTEM ou
+           Administradores), os dois aceitos pelo serviço. -->
       <Component Id="PastaDados" Directory="DATAFOLDER" Bitness="always64">
         <CreateFolder>
-          <PermissionEx Sddl="O:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)" />
+          <PermissionEx Sddl="D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)" />
         </CreateFolder>
         <RegistryValue Root="HKLM" Key="SOFTWARE\VPNMonitor" Name="DataDir" Type="string"
                        Value="[DATAFOLDER]" KeyPath="yes" />

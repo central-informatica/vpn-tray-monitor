@@ -173,16 +173,49 @@ function Assert-ServicePolicy {
     # comando inexistente): o prazo fica conferido só pelo registro, acima.
 }
 
-# Assert-DataAcl confere a pasta de dados como o MSI (PermissionEx) e o
-# serviço (acl.DirSDDL) a deixam: dono Administradores (BA), DACL protegida
-# (P) com só SYSTEM e Administradores em controle total, e nada posto em
-# quarentena (acl: <pasta>.naoconfiavel-<data>).
+# Assert-DataAcl confere a pasta de dados como o MSI (PermissionEx, só a
+# DACL) e o serviço (acl.DirSDDL) a deixam: DACL protegida (P) com só SYSTEM
+# e Administradores em controle total, e nada posto em quarentena (acl:
+# <pasta>.naoconfiavel-<data>). Dono SYSTEM ou Administradores: o MSI não
+# define dono (§9), então numa instalação limpa ele é o dono padrão do
+# token do msiexec; o serviço aceita os dois (acl.OwnerTrusted) e não o
+# reescreve; quando recria a pasta (quarentena), o dono é BA.
 function Assert-DataAcl {
     $sddl = (Get-Acl $script:DataDir).GetSecurityDescriptorSddlForm('Owner, Access')
-    $ok = $sddl -match '^O:BAD:PA?I?(\(A;OICI;FA;;;SY\)\(A;OICI;FA;;;BA\)|\(A;OICI;FA;;;BA\)\(A;OICI;FA;;;SY\))$'
+    $ok = $sddl -match '^O:(SY|BA)D:PA?I?(\(A;OICI;FA;;;SY\)\(A;OICI;FA;;;BA\)|\(A;OICI;FA;;;BA\)\(A;OICI;FA;;;SY\))$'
     Assert-That $ok "ACL da pasta de dados ($sddl)"
-    $quarantined = @(Get-ChildItem $env:ProgramData -Directory -Filter 'VPNMonitor.naoconfiavel-*' -ErrorAction SilentlyContinue)
+    $quarantined = @(Get-QuarantinedDataDir)
     Assert-That ($quarantined.Count -eq 0) 'o serviço não pôs a pasta de dados em quarentena'
+}
+
+# Get-QuarantinedDataDir lista as pastas postas de lado pelo serviço.
+function Get-QuarantinedDataDir {
+    return @(Get-ChildItem $env:ProgramData -Directory -Filter 'VPNMonitor.naoconfiavel-*' -ErrorAction SilentlyContinue)
+}
+
+# Initialize-UntrustedDataDir pré-cria a pasta de dados vazia com dono = uma conta
+# local comum criada só para o teste (o que um usuário sem privilégio pode
+# fazer na ProgramData antes da primeira instalação). A senha é aleatória,
+# de 14 caracteres (com mais, o net user pede confirmação), e não vai a log.
+function Initialize-UntrustedDataDir {
+    param([Parameter(Mandatory)][string]$User)
+    $chars = 'abcdefghijkmnpqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789'
+    $bytes = [byte[]]::new(10)
+    [Security.Cryptography.RandomNumberGenerator]::Fill($bytes)
+    $secret = 'Aa1!' + (-join ($bytes | ForEach-Object { $chars[$_ % $chars.Length] }))
+    $out = & net.exe user $User $secret /add 2>&1 | Out-String
+    if ($LASTEXITCODE -ne 0) { throw "net user $User /add saiu com $LASTEXITCODE`: $out" }
+    New-Item -ItemType Directory -Path $script:DataDir | Out-Null
+    $out = & icacls.exe $script:DataDir /setowner $User 2>&1 | Out-String
+    if ($LASTEXITCODE -ne 0) { throw "icacls /setowner $User saiu com $LASTEXITCODE`: $out" }
+    $owner = (Get-Acl $script:DataDir).Owner
+    Assert-That ($owner -like "*\$User") "pasta de dados pré-criada com dono $owner"
+}
+
+# Unregister-E2EUser apaga a conta local do teste (sem falhar se não existir).
+function Unregister-E2EUser {
+    param([Parameter(Mandatory)][string]$User)
+    & net.exe user $User /delete 2>&1 | Out-Null
 }
 
 # Assert-EventSource confere a origem do Event Log registrada pelo MSI

@@ -4,8 +4,11 @@
 package installer
 
 import (
+	"encoding/json"
 	"encoding/xml"
 	"os"
+	"path/filepath"
+	"regexp"
 	"slices"
 	"strings"
 	"testing"
@@ -150,8 +153,14 @@ func TestServiceMatchesCode(t *testing.T) {
 func TestDataFolderACLMatchesService(t *testing.T) {
 	root := load(t)
 	pe := root.one(t, nsWix, "PermissionEx")
-	if got := pe.attr("Sddl"); got != acl.DirSDDL {
-		t.Fatalf("Sddl %q, o serviço espera %q", got, acl.DirSDDL)
+	// Só a DACL do serviço, sem dono: o MSI não pode trocar o dono de uma
+	// pasta pré-criada por usuário comum (o serviço a põe em quarentena, §5.1).
+	i := strings.Index(acl.DirSDDL, "D:")
+	if i < 0 {
+		t.Fatalf("acl.DirSDDL sem DACL: %q", acl.DirSDDL)
+	}
+	if got, want := pe.attr("Sddl"), acl.DirSDDL[i:]; got != want {
+		t.Fatalf("Sddl %q, quer só a DACL do serviço %q (sem O:)", got, want)
 	}
 	var dataDir node
 	for _, d := range root.all(nsWix, "Directory") {
@@ -296,6 +305,54 @@ func TestOneFilePerComponent(t *testing.T) {
 		}
 		if g := c.attr("Guid"); g != "" && g != "*" {
 			t.Errorf("componente %q com Guid fixo %q; quer automático", c.attr("Id"), g)
+		}
+	}
+}
+
+// O fabricante aparece em três lugares que o build não amarra: o define do
+// Product.wxs e o CompanyName dos recursos dos dois exes.
+func TestManufacturerMatchesExeResources(t *testing.T) {
+	data, err := os.ReadFile("Product.wxs")
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := regexp.MustCompile(`<\?define\s+Manufacturer\s*=\s*"([^"]*)"\s*\?>`).FindSubmatch(data)
+	if m == nil {
+		t.Fatal("Product.wxs sem <?define Manufacturer = \"…\" ?>")
+	}
+	want := string(m[1])
+	if want == "" {
+		t.Fatal("fabricante vazio")
+	}
+	for _, exe := range []string{"vpnmon-svc", "vpnmon-tray"} {
+		path := filepath.Join("..", "cmd", exe, "winres", "winres.json")
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var res struct {
+			Version map[string]map[string]struct {
+				Info map[string]struct {
+					CompanyName string
+				} `json:"info"`
+			} `json:"RT_VERSION"`
+		}
+		if err := json.Unmarshal(raw, &res); err != nil {
+			t.Fatalf("%s: %v", path, err)
+		}
+		n := 0
+		for _, langs := range res.Version {
+			for _, lang := range langs {
+				for _, info := range lang.Info {
+					n++
+					if info.CompanyName != want {
+						t.Errorf("%s: CompanyName %q, o MSI usa %q", path, info.CompanyName, want)
+					}
+				}
+			}
+		}
+		if n == 0 {
+			t.Errorf("%s: nenhum bloco de versão com CompanyName", path)
 		}
 	}
 }

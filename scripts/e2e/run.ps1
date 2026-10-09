@@ -36,11 +36,14 @@ $NewMsi = (Resolve-Path $NewMsi).Path
 
 $Entry = 'E2E VPN'
 $LinkEntry = 'E2E Link'
+# Conta local comum que pré-cria a pasta de dados no passo 9.
+$E2EUser = 'vpnmon-e2e'
 
 try {
     Write-Step '0. Sonda: RasMan e Add-VpnConnection'
     Test-RasAvailable
     Assert-That (-not (Get-Service VPNMonitor -ErrorAction SilentlyContinue)) 'máquina sem VPN Monitor instalado'
+    Assert-That (-not (Test-Path $DataDir)) 'máquina sem pasta de dados (instalação limpa)'
 
     Write-Step '1. Entradas RAS para todos os usuários, servidor inalcançável (TEST-NET)'
     foreach ($name in $Entry, $LinkEntry) {
@@ -239,6 +242,27 @@ try {
     Assert-That (-not (Get-Service VPNMonitor -ErrorAction SilentlyContinue)) 'serviço removido'
     Assert-That (-not (Test-Path $DataDir)) 'PURGE=1 removeu a ProgramData'
 
+    Write-Step '9. Pasta de dados pré-criada por usuário comum vai para a quarentena'
+    # O MSI aplica só a DACL (sem O:): o dono continua o usuário, e o serviço,
+    # na partida, põe a pasta de lado e a recria (§5.1). Com O:BA no MSI a
+    # pasta passaria como confiável.
+    Initialize-UntrustedDataDir -User $E2EUser
+    $code = Invoke-Msiexec -Mode '/i' -Msi $NewMsi -LogFile (Join-Path $LogDir 'install-precriada.log')
+    Assert-That ($code -in 0, 3010) "instalação sobre a pasta pré-criada (código $code)"
+    Wait-Until -TimeoutSeconds 30 -Message 'serviço em execução sobre a pasta pré-criada' -Condition {
+        (Get-Service VPNMonitor -ErrorAction SilentlyContinue).Status -eq 'Running'
+    }
+    $quarantined = @(Get-QuarantinedDataDir)
+    Assert-That ($quarantined.Count -eq 1) "pasta pré-criada posta em quarentena ($($quarantined.Name -join ', '))"
+    $qOwner = (Get-Acl $quarantined[0].FullName).Owner
+    Assert-That ($qOwner -like "*\$E2EUser") "a quarentena guarda a pasta do usuário (dono $qOwner)"
+    Remove-Item $quarantined[0].FullName -Recurse -Force
+    Assert-DataAcl
+    Assert-That ((Get-Acl $DataDir).GetSecurityDescriptorSddlForm('Owner') -eq 'O:BA') 'pasta recriada pelo serviço com dono Administradores'
+    $code = Invoke-Msiexec -Mode '/x' -Msi $NewMsi -LogFile (Join-Path $LogDir 'uninstall-precriada.log') -Properties @('PURGE=1')
+    Assert-That ($code -in 0, 3010) "msiexec /x PURGE=1 após a quarentena (código $code)"
+    Assert-That (-not (Test-Path $DataDir)) 'PURGE=1 removeu a ProgramData'
+
     Write-Host ''
     Write-Host 'e2e do MSI: tudo certo'
 }
@@ -247,6 +271,7 @@ catch {
     throw
 }
 finally {
+    Unregister-E2EUser -User $E2EUser
     foreach ($name in $Entry, $LinkEntry) {
         Remove-VpnConnection -Name $name -AllUserConnection -Force -ErrorAction SilentlyContinue
     }

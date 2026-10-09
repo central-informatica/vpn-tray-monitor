@@ -54,11 +54,15 @@ lê no **primeiro** início sem `config.json`. Depois disso, a configuração
 muda pela bandeja ou pela CLI. Os valores não podem começar com `#` (o
 Windows Installer leria como número). **Nenhuma senha passa pelo MSI.**
 
-A credencial é gravada depois, pela CLI elevada, lendo a senha do stdin:
+A credencial é gravada depois, pela CLI elevada. Sem `--password-stdin` ela
+pede a senha sem eco:
 
 ```powershell
-"senha" | & "$env:ProgramFiles\VPN Monitor\vpnmon-svc.exe" credential set Matriz --user DOMINIO\usuario --password-stdin
+& "$env:ProgramFiles\VPN Monitor\vpnmon-svc.exe" credential set Matriz --user DOMINIO\usuario
 ```
+
+Não escreva a senha na linha de comando (`"senha" | …`): ela fica no
+histórico do PowerShell (PSReadLine) e no log de scripts.
 
 [`scripts/deploy-exemplo.ps1`](scripts/deploy-exemplo.ps1) junta os dois
 passos (instalação silenciosa + `credential set` com a senha num
@@ -80,8 +84,11 @@ passos (instalação silenciosa + `credential set` com a senha num
 - **Intune:** como app de linha de negócios (MSI, com os argumentos acima) ou
   como app Win32 empacotando o `deploy-exemplo.ps1` com o MSI. Detecção pelo
   código de produto do MSI ou pelo *valor* `Version` da chave
-  `HKLM\SOFTWARE\VPNMonitor`. O Intune executa o script em 32 bits e como
-  SYSTEM (sem console para pedir senha): o `deploy-exemplo.ps1` resolve o
+  `HKLM\SOFTWARE\VPNMonitor`. Esse valor guarda a `ProductVersion` do MSI,
+  não a versão do nome do arquivo: a 2.1.0 grava `2.1.99` e a 2.1.0-rc.2,
+  `2.1.2` (ver "Release"). Na regra do Intune, compare como versão
+  (`maior ou igual a 2.1.99`), não como texto. O Intune executa o script em
+  32 bits e como SYSTEM (sem console para pedir senha): o `deploy-exemplo.ps1` resolve o
   caminho de 64 bits, mas a senha precisa de outro meio (ver o aviso acima).
 
 ### Atualização
@@ -143,6 +150,12 @@ Quem instalou à mão com `vpnmon-svc install` deve rodar
   `PermissionEx` do MSI age no destino da junção; sem custom action própria
   não há defesa no MSI (o serviço detecta a pasta adulterada na partida e a
   põe em quarentena). Ver spec §9.
+- **Pasta de dados pré-criada:** o MSI aplica à
+  `%ProgramData%\VPNMonitor` só a lista de acesso (SYSTEM e Administradores),
+  **sem trocar o dono**. Se um usuário comum a criou antes da instalação, ela
+  continua dele e o serviço, na partida, a põe de lado
+  (`VPNMonitor.naoconfiavel-*`) e cria outra, vazia. Numa instalação limpa o
+  dono é SYSTEM ou Administradores, ambos aceitos.
 - **Fabricante provisório:** "Central Informática" ainda **precisa ser
   confirmado**. Para trocar, edite `installer/Product.wxs` (`<?define
   Manufacturer = … ?>`) e o `CompanyName` de
@@ -248,7 +261,8 @@ Windows do CI. O que só o Windows real cobre está em
 reproduzível) → `msi` (WiX, sem assinatura; artefato `msi`) → `e2e` (roteiro
 do MSI num runner Windows: instala com seed, confere serviço, ACL e política,
 discagem com backoff, credencial, parada ≤ 10 s, upgrade 0.0.199 → 0.0.299,
-downgrade recusado, desinstalação e `PURGE=1`; logs no artefato `e2e-logs`).
+downgrade recusado, desinstalação e `PURGE=1`, pasta de dados pré-criada por
+usuário comum indo para a quarentena; logs no artefato `e2e-logs`).
 
 ### Release
 
