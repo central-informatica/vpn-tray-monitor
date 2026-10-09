@@ -6,9 +6,11 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"path/filepath"
 
 	"golang.org/x/sys/windows"
 
+	"github.com/guibsu/vpn-tray-monitor/internal/core/config"
 	"github.com/guibsu/vpn-tray-monitor/internal/core/ipc"
 	"github.com/guibsu/vpn-tray-monitor/internal/core/platform/instance"
 	"github.com/guibsu/vpn-tray-monitor/internal/features/tray/client"
@@ -27,17 +29,35 @@ func run() int {
 	}
 	defer release()
 
+	ver := appVersion()
+	log, closeLog := trayLog()
+	defer closeLog()
+	log.Info("bandeja iniciada", "versao", ver)
+	defer log.Info("bandeja encerrada")
+
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	// ipc.Dial confere o PID do servidor do pipe contra o do serviço (§6.1).
-	c := client.New(client.Options{Dial: ipc.Dial, AppVersion: appVersion()})
+	c := client.New(client.Options{Dial: ipc.Dial, AppVersion: ver})
 	go c.Run(ctx)
 
-	code, err := view.Run(view.Options{Events: c.Events(), Caller: c, Stats: c.Stats, AppVersion: appVersion(), Log: slog.New(slog.DiscardHandler)})
+	code, err := view.Run(view.Options{Events: c.Events(), Caller: c, Stats: c.Stats, AppVersion: ver, Log: log})
 	if err != nil {
+		log.Error("bandeja", "erro", err)
 		fatal(err.Error())
 	}
 	return code
+}
+
+// trayLog abre o log em %LOCALAPPDATA%\VPNMonitor (config.DataDirName); sem
+// a pasta, a bandeja segue sem log (descarta).
+func trayLog() (*slog.Logger, func()) {
+	if dir, err := windows.KnownFolderPath(windows.FOLDERID_LocalAppData, 0); err == nil {
+		if l, closeLog, err := openTrayLog(filepath.Join(dir, config.DataDirName)); err == nil {
+			return l, closeLog
+		}
+	}
+	return slog.New(slog.DiscardHandler), func() {}
 }
 
 // fatal avisa numa caixa de mensagem: windowsgui não tem console.

@@ -272,7 +272,8 @@ corrigida pelo serviço a cada início.
 
 Raiz com dono não confiável (nem SYSTEM nem Administradores) vai para a
 quarentena mesmo vazia. É intencional: quem pré-cria a pasta mantém `WRITE_DAC`
-sobre ela e poderia reabrir a ACL depois da correção.
+sobre ela e poderia reabrir a ACL depois da correção. Por isso o MSI aplica só
+a DACL, sem trocar o dono (§9).
 
 Processos elevados da CLI e do `run` definem Administradores como dono padrão
 do token (`TokenOwner`) na partida; sem isso o Windows cria os arquivos com
@@ -490,11 +491,33 @@ e os intervalos; os valores omitidos usam os padrões da §5.2.
 
 - Por máquina, x64, Windows 10 1809+/11, Server 2019+.
 - `C:\Program Files\VPN Monitor\` com os dois exes, licença e README.
-- Serviço via `ServiceInstall`/`ServiceControl` nativos; recuperação via
-  `ServiceConfigFailureActions` nativo (reiniciar após 5 s, 30 s, 60 s; zerar
-  em 1 dia); ACL da ProgramData via `PermissionEx` nativo com
-  `Sddl="D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)"` (MsiLockPermissionsEx; o `P`
-  desliga a herança). Event Log via `util:EventSource` (só registro, sem CA).
+- Serviço via `ServiceInstall`/`ServiceControl` nativos (automático,
+  LocalSystem, `ErrorControl` normal, dependência do RasMan). **Recuperação
+  (reiniciar após 5 s, 30 s, 60 s; zerar em 1 dia; também em falha sem crash)
+  e preshutdown de 15 s são aplicados pelo próprio serviço a cada partida
+  (`svc.EnsurePolicy`)**, não pelo MSI: a Microsoft documenta que a tabela
+  `MsiServiceConfigFailureActions` "is not working as expected" (o WiX avisa
+  com WIX1149 ao usar `ServiceConfigFailureActions`), e o `util:ServiceConfig`
+  exigiria custom action e não cobre o flag de falha sem crash nem o
+  preshutdown. ACL da ProgramData via `PermissionEx` nativo com
+  `Sddl="D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)"` (= a parte `D:` de
+  `acl.DirSDDL`; MsiLockPermissionsEx; o `P` desliga a herança). **Sem `O:`
+  de propósito:** o MSI não troca o dono. Se um usuário comum pré-criou
+  `%ProgramData%\VPNMonitor`, a pasta continua dele e o serviço a põe em
+  quarentena na partida (§5.1); com `O:BA` o MSI a tornaria "confiável" e um
+  handle com `WRITE_DAC` aberto antes continuaria valendo. Numa instalação
+  limpa o dono é o dono padrão do token do msiexec, SYSTEM, que o serviço
+  aceita (como Administradores) e não reescreve; quando o serviço recria a
+  pasta, o dono é Administradores. O e2e confere os dois
+  casos (§10.3). Event Log via `util:EventSource` (só registro, sem CA).
+- `MSIRESTARTMANAGERCONTROL=Disable`: o MSI não fecha a bandeja aberta nas
+  sessões no upgrade/desinstalação; o exe em uso é trocado na reinicialização
+  (msiexec devolve 3010) e o serviço já roda a versão nova.
+- **Limitação conhecida:** se um usuário comum pré-criar
+  `%ProgramData%\VPNMonitor` como junção antes da primeira instalação, o
+  `PermissionEx` do MSI age no destino da junção. Sem custom action própria
+  não há defesa no MSI; o serviço detecta a pasta adulterada na partida e a
+  põe em quarentena (§5.1).
 - **Nenhuma custom action própria.** A única CA usada é a padrão do WiX
   `util:RemoveFolderEx`, condicionada a `PURGE=1` na desinstalação.
 - Bandeja no HKLM `Run`; ela abre no próximo login de cada usuário. O MSI não
@@ -513,13 +536,18 @@ e os intervalos; os valores omitidos usam os padrões da §5.2.
 
 | Job | Runner | Conteúdo |
 |---|---|---|
-| lint | ubuntu | `gofmt`, `go mod tidy` sem diff, `go vet` (linux e `GOOS=windows`), `golangci-lint` com `.golangci.yml` |
-| security | ubuntu | `govulncheck`; CodeQL Go (também semanal) |
-| test-linux | ubuntu | `go test -race -shuffle=on`; cobertura ≥ 80% em `core/*`, `features/*/domain`, `features/*/service`, `features/tray/viewmodel`, **excluindo arquivos `*_windows.go`** (cobertos pelo job Windows); resumo no job |
+| lint | ubuntu | `gofmt`, `go mod tidy` sem diff (também em `tools/winres`), `go vet` (linux e `GOOS=windows`), `golangci-lint` (linux e `GOOS=windows`) com `.golangci.yml`, `actionlint` nos workflows, PSScriptAnalyzer nos scripts PowerShell |
+| security | ubuntu | `govulncheck` (linux e `GOOS=windows`) |
+| codeql | windows | CodeQL Go (build manual no Windows, para cobrir os `*_windows.go`); também no agendamento semanal |
+| test-linux | ubuntu | `go test -race -shuffle=on`; cobertura ≥ 80% no conjunto `core/*`, `features/*/domain`, `features/*/service`, `features/tray/viewmodel`, **excluindo arquivos `*_windows.go`** (cobertos pelo job Windows), e ≥ 80% só no `features/tray/viewmodel`; resumo no job |
 | test-windows | windows | `go test -race ./...` incluindo adaptadores reais (`-race` exige cgo: `CGO_ENABLED=1` com o gcc MinGW do runner; o build de produção segue `CGO_ENABLED=0`) |
-| build | windows | exes com `go-winres` (versão, manifest, ícone) + MSI sem assinatura; artefatos |
-| e2e | windows | roteiro da seção 10.3; compila dois MSIs (`ProductVersion` 0.0.199 e 0.0.299, ver §10.2) para testar o upgrade |
+| build | ubuntu | cross-compile dos dois exes com `go-winres` (versão, manifest, ícone) por `make repro`: build reproduzível, feito duas vezes e comparado byte a byte; versão via `tools/msiversion`; artefato `binarios` |
+| msi | windows | WiX v5 sobre os exes do `build`: MSI da versão (sem assinatura) e os dois MSIs do e2e (`ProductVersion` 0.0.199 e 0.0.299, ver §10.2); artefatos |
+| e2e | windows | roteiro da seção 10.3 com os MSIs do job `msi` |
 
+Gatilhos: push em `main` e `feat/**`, PR, semanal (segunda) e
+`workflow_call` (o `release.yml` reusa o CI com a tag como versão). Todo job
+tem `timeout-minutes`.
 Concorrência por ramo com cancelamento; `permissions` mínimas; actions fixadas
 por SHA.
 
@@ -561,6 +589,10 @@ por SHA.
 7. Instala o MSI 0.0.299 por cima; confere config e credencial preservadas.
 8. Desinstala; confere ProgramData preservada. Reinstala e desinstala com
    `PURGE=1`; confere remoção.
+9. Pré-cria a ProgramData vazia com dono = uma conta local comum criada no
+   teste; instala; confere que o serviço a pôs em quarentena
+   (`VPNMonitor.naoconfiavel-*`, ainda com o dono do usuário) e a recriou com
+   dono Administradores; desinstala com `PURGE=1`.
 
 ### 10.4 Higiene
 

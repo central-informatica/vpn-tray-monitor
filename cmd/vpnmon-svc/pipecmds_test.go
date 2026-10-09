@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"path/filepath"
 	"strings"
@@ -240,5 +241,97 @@ func TestCommandTableIsSingleSource(t *testing.T) {
 		if strings.Contains(te.errb.String(), "comando desconhecido") {
 			t.Errorf("%s não despachado: %q", name, te.errb)
 		}
+	}
+}
+
+// status --json devolve o snapshot do protocolo, legível por scripts (e2e).
+func TestStatusJSON(t *testing.T) {
+	te := newTestEnv(t)
+	startService(t, te)
+	waitFor(t, func() bool { return stateVia(te) == ipc.StateConectada })
+	if code := te.run("status", "--json"); code != 0 {
+		t.Fatalf("status --json: %d %q", code, te.errb)
+	}
+	var snap ipc.Snapshot
+	if err := json.Unmarshal(te.out.Bytes(), &snap); err != nil {
+		t.Fatalf("saída não é JSON: %v\n%s", err, te.out)
+	}
+	if len(snap.VPNs) != 1 || snap.VPNs[0].Name != "Matriz" || snap.VPNs[0].State != ipc.StateConectada {
+		t.Fatalf("snapshot: %+v", snap)
+	}
+	if code := te.run("status", "--json", "x"); code != 2 {
+		t.Fatalf("argumento extra: %d", code)
+	}
+	if code := te.run("status", "--yaml"); code != 2 {
+		t.Fatalf("flag desconhecida: %d", code)
+	}
+}
+
+// O texto do status mostra config inválida (com a Message real do serviço, sem
+// prefixo próprio nem campos repetidos) e o prazo do bloqueio de credencial.
+func TestFormatStatusConfigAndBlocked(t *testing.T) {
+	now := time.Date(2026, 10, 7, 15, 0, 0, 0, time.UTC)
+	problems := []config.FieldError{{Field: "vpns[0].check.port", Message: "obrigatória"}}
+	ve := &config.ValidationError{Problems: problems}
+	snap := ipc.Snapshot{
+		Config: &ipc.ConfigStatus{OK: false, Message: ve.Error(), Fields: problems},
+		VPNs:   []ipc.VPNView{{Name: "Matriz", State: "CredencialInvalida", BlockedUntilUnix: now.Add(time.Hour).Unix()}},
+	}
+	out := formatStatus(snap, now)
+	if !strings.HasPrefix(out, "aviso: "+ve.Error()+"\n") || strings.Count(out, "vpns[0].check.port: obrigatória") != 1 {
+		t.Errorf("mensagem real sem duplicar campos:\n%s", out)
+	}
+	if want := "bloqueada até " + time.Unix(now.Add(time.Hour).Unix(), 0).Format("15:04"); !strings.Contains(out, want) {
+		t.Errorf("faltou %q em:\n%s", want, out)
+	}
+	// Campos que a mensagem não contém são listados.
+	snap.Config = &ipc.ConfigStatus{Message: "config.json removido; mantendo a configuração em uso", Fields: problems}
+	if out := formatStatus(snap, now); !strings.HasPrefix(out, "aviso: config.json removido; mantendo a configuração em uso\n") ||
+		strings.Contains(out, "inválido") || !strings.Contains(out, "  vpns[0].check.port: obrigatória") {
+		t.Errorf("caso removido:\n%s", out)
+	}
+	snap.Config = &ipc.ConfigStatus{OK: true}
+	snap.VPNs[0].BlockedUntilUnix = now.Add(-time.Minute).Unix()
+	if out := formatStatus(snap, now); strings.Contains(out, "aviso") || strings.Contains(out, "bloqueada") {
+		t.Fatalf("config ok/prazo vencido não devem aparecer: %s", out)
+	}
+	if out := formatStatus(ipc.Snapshot{Config: &ipc.ConfigStatus{Message: "x"}}, now); !strings.Contains(out, "aviso: x") || !strings.Contains(out, "nenhuma VPN") {
+		t.Fatalf("sem VPNs: %s", out)
+	}
+}
+
+// Contrato do --json para scripts: chaves do protocolo, stderr limpo no
+// sucesso; com o serviço fora, stdout vazio e erro em stderr (código 1).
+func TestStatusJSONContract(t *testing.T) {
+	te := newTestEnv(t)
+	te.run("status", "--json")
+	if te.out.Len() != 0 || !strings.HasPrefix(te.errb.String(), "erro: ") {
+		t.Fatalf("dial falhando: out=%q err=%q", te.out, te.errb)
+	}
+	if code := te.run("status", "--json"); code != 1 {
+		t.Fatalf("dial falhando: código %d", code)
+	}
+	te = newTestEnv(t)
+	startService(t, te)
+	waitFor(t, func() bool { return stateVia(te) == ipc.StateConectada })
+	if code := te.run("status", "--json"); code != 0 || te.errb.Len() != 0 {
+		t.Fatalf("sucesso: %d stderr=%q", code, te.errb)
+	}
+	var m map[string]any
+	if err := json.Unmarshal(te.out.Bytes(), &m); err != nil {
+		t.Fatal(err)
+	}
+	vpns, _ := m["vpns"].([]any)
+	if len(vpns) != 1 {
+		t.Fatalf("vpns: %v", m)
+	}
+	v, _ := vpns[0].(map[string]any)
+	for _, k := range []string{"name", "state", "attempt"} {
+		if _, ok := v[k]; !ok {
+			t.Errorf("vpns[0] sem %q: %v", k, v)
+		}
+	}
+	if _, ok := m["config"]; !ok {
+		t.Errorf("snapshot sem \"config\": %v", m)
 	}
 }

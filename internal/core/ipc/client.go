@@ -45,7 +45,7 @@ func (c *Client) Call(typ string, payload any, out any) error {
 		return err
 	}
 	_ = c.conn.SetDeadline(time.Now().Add(c.CallTimeout))
-	defer c.conn.SetDeadline(time.Time{})
+	defer func() { _ = c.conn.SetDeadline(time.Time{}) }()
 	if err := c.codec.Write(m); err != nil {
 		return err
 	}

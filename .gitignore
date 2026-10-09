@@ -11,3 +11,10 @@ coverage-tray.out
 
 # Script da VM de testes local (contém credenciais da VM)
 vm.sh
+
+# Saídas do CI/release na raiz (scripts/e2e é código: só a raiz é ignorada)
+/e2e/
+/e2e-logs/
+/portatil/
+/sbom-input/
+/notes.md

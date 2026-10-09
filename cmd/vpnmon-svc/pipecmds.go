@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -30,11 +31,27 @@ func withClient(e env, f func(*ipc.Client) error) error {
 	return explain(f(c))
 }
 
-func cmdStatus(e env) error {
+// cmdStatus mostra o estado das VPNs; com --json, o snapshot do protocolo
+// como veio do serviço (para scripts: roteiro e2e, monitoração).
+func cmdStatus(args []string, e env) error {
+	fs := flag.NewFlagSet("status", flag.ContinueOnError)
+	asJSON := fs.Bool("json", false, "imprime o snapshot em JSON")
+	pos, err := parseFlags(fs, args)
+	if err != nil {
+		return err
+	}
+	if len(pos) > 0 {
+		return usageError{"use: status [--json]"}
+	}
 	return withClient(e, func(c *ipc.Client) error {
 		var snap ipc.Snapshot
 		if err := c.Call(ipc.TypeStatus, nil, &snap); err != nil {
 			return err
+		}
+		if *asJSON {
+			enc := json.NewEncoder(e.stdout)
+			enc.SetIndent("", "  ")
+			return enc.Encode(snap)
 		}
 		fmt.Fprint(e.stdout, formatStatus(snap, e.now()))
 		return nil
@@ -54,10 +71,21 @@ func ago(now time.Time, unix int64) string {
 
 // formatStatus monta a tabela do `status`.
 func formatStatus(s ipc.Snapshot, now time.Time) string {
-	if len(s.VPNs) == 0 {
-		return "nenhuma VPN configurada (use: vpnmon-svc vpn add)\n"
-	}
 	var b strings.Builder
+	if s.Config != nil && !s.Config.OK {
+		// Message já vem pronta do serviço (inclusive com os campos, no caso de
+		// validação); os campos só são listados se a mensagem não os contém.
+		fmt.Fprintf(&b, "aviso: %s\n", s.Config.Message)
+		for _, f := range s.Config.Fields {
+			if !strings.Contains(s.Config.Message, f.Field+": "+f.Message) {
+				fmt.Fprintf(&b, "  %s: %s\n", f.Field, f.Message)
+			}
+		}
+	}
+	if len(s.VPNs) == 0 {
+		b.WriteString("nenhuma VPN configurada (use: vpnmon-svc vpn add)\n")
+		return b.String()
+	}
 	w := tabwriter.NewWriter(&b, 0, 0, 2, ' ', 0)
 	fmt.Fprintln(w, "VPN\tESTADO\tDESDE\tÚLTIMA VERIFICAÇÃO\tDETALHE")
 	for _, v := range s.VPNs {
@@ -75,6 +103,9 @@ func formatStatus(s ipc.Snapshot, now time.Time) string {
 		// "próxima em" nunca é negativo.
 		if next := time.Unix(v.NextAttemptUnix, 0); v.NextAttemptUnix > 0 && next.After(now) {
 			detail = append(detail, fmt.Sprintf("próxima em %s", domain.FormatOutage(next.Sub(now))))
+		}
+		if next := time.Unix(v.BlockedUntilUnix, 0); v.BlockedUntilUnix > 0 && next.After(now) {
+			detail = append(detail, "bloqueada até "+next.Format("15:04"))
 		}
 		switch {
 		case v.PausedIndefinite:

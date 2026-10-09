@@ -26,16 +26,6 @@ const (
 	Desativada         State = "Desativada"
 )
 
-// isDown diz se o estado conta como "fora do ar" para o aviso de queda.
-// Degradada não conta: uma perda de ping isolada não é queda.
-func isDown(s State) bool {
-	switch s {
-	case Reconectando, Desconectada, CredencialInvalida, ErroConfig, SemRede:
-		return true
-	}
-	return false
-}
-
 // Params é o trecho da config que o domínio usa, já em durações.
 type Params struct {
 	Name           string

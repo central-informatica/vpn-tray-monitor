@@ -20,7 +20,8 @@ type Logf func(format string, args ...any)
 
 // DirSDDL é o descritor da pasta. O dono (O:BA) importa: quem pré-cria a
 // pasta continua dono e, como dono, mantém WRITE_DAC mesmo fora da DACL.
-// A DACL é a mesma que o MSI aplica via PermissionEx.
+// O MSI aplica via PermissionEx só a parte D: (sem O:), para não trocar o
+// dono de uma pasta pré-criada: assim o serviço a vê e a põe em quarentena.
 const DirSDDL = "O:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)"
 
 var wantACEs = []string{"A;OICI;FA;;;BA", "A;OICI;FA;;;SY"}

@@ -19,9 +19,6 @@ const accepts = svc.AcceptStop | svc.AcceptPreShutdown | svc.AcceptPowerEvent
 
 type handler struct{ hooks Hooks }
 
-// preshutdownTimeoutMs é o tempo que o SCM espera o serviço no preshutdown.
-const preshutdownTimeoutMs = 15000
-
 func (h handler) Execute(_ []string, r <-chan svc.ChangeRequest, s chan<- svc.Status) (bool, uint32) {
 	reqs := make(chan Request)
 	stopWait := h.hooks.StopTimeout
@@ -80,7 +77,7 @@ func runNamed(name string, h Hooks) error { return svc.Run(name, handler{h}) }
 // LocalSystem, recuperação 5 s/30 s/60 s zerando em 1 dia) e a origem do
 // Event Log. É o caminho sem MSI.
 func Install(exePath string) error {
-	return installNamed(ServiceName, DisplayName, exePath, []string{"RasMan"})
+	return installNamed(ServiceName, DisplayName, exePath, Dependencies())
 }
 
 func installNamed(name, display, exePath string, deps []string, args ...string) (err error) {
@@ -97,6 +94,7 @@ func installNamed(name, display, exePath string, deps []string, args ...string) 
 		DisplayName:  display,
 		Description:  Description,
 		StartType:    mgr.StartAutomatic,
+		ErrorControl: mgr.ErrorNormal, // igual ao ErrorControl="normal" do MSI
 		Dependencies: deps,
 	}, args...)
 	if err != nil {
@@ -109,23 +107,8 @@ func installNamed(name, display, exePath string, deps []string, args ...string) 
 			_ = s.Delete()
 		}
 	}()
-	actions := []mgr.RecoveryAction{
-		{Type: mgr.ServiceRestart, Delay: 5 * time.Second},
-		{Type: mgr.ServiceRestart, Delay: 30 * time.Second},
-		{Type: mgr.ServiceRestart, Delay: 60 * time.Second},
-	}
-	if err := s.SetRecoveryActions(actions, uint32((24 * time.Hour).Seconds())); err != nil {
-		return fmt.Errorf("configurando recuperação: %w", err)
-	}
-	// Run que termina com erro limpo vira SERVICE_STOPPED com código de saída,
-	// não crash: sem este flag a recuperação não dispararia.
-	if err := s.SetRecoveryActionsOnNonCrashFailures(true); err != nil {
-		return fmt.Errorf("configurando recuperação em falhas sem crash: %w", err)
-	}
-	info := struct{ PreshutdownTimeout uint32 }{preshutdownTimeoutMs}
-	if err := windows.ChangeServiceConfig2(s.Handle, windows.SERVICE_CONFIG_PRESHUTDOWN_INFO,
-		(*byte)(unsafe.Pointer(&info))); err != nil {
-		return fmt.Errorf("configurando tempo de preshutdown: %w", err)
+	if err := applyPolicy(s); err != nil {
+		return err
 	}
 	// O MSI (util:EventSource) ou um install anterior pode já ter registrado a
 	// origem; o x/sys devolve um erro de texto ("registry key already exists"),
@@ -135,6 +118,92 @@ func installNamed(name, display, exePath string, deps []string, args ...string) 
 		return fmt.Errorf("registrando a origem do Event Log: %w", err)
 	}
 	return nil
+}
+
+// readPolicy lê a política atual; o que não der para ler fica zerado (e
+// por isso diverge e é regravado: leitura que falha conta como divergência).
+func readPolicy(s *mgr.Service) Policy {
+	var p Policy
+	if acts, err := s.RecoveryActions(); err == nil {
+		for _, a := range acts {
+			p.Actions = append(p.Actions, RecoveryStep{Restart: a.Type == mgr.ServiceRestart, Delay: a.Delay})
+		}
+	}
+	if rp, err := s.ResetPeriod(); err == nil {
+		p.Reset = time.Duration(rp) * time.Second
+	}
+	if f, err := s.RecoveryActionsOnNonCrashFailures(); err == nil {
+		p.NonCrash = f
+	}
+	var info struct{ PreshutdownTimeout uint32 }
+	var needed uint32
+	if err := windows.QueryServiceConfig2(s.Handle, windows.SERVICE_CONFIG_PRESHUTDOWN_INFO,
+		(*byte)(unsafe.Pointer(&info)), uint32(unsafe.Sizeof(info)), &needed); err == nil {
+		p.Preshutdown = time.Duration(info.PreshutdownTimeout) * time.Millisecond
+	}
+	return p
+}
+
+// applyPolicy grava a política do SCM (WantedPolicy): recuperação, também
+// quando o serviço para com erro sem crash, e o prazo de preshutdown. Só
+// grava o que diverge (DiffPolicy): regravar a recuperação zeraria a
+// contagem de falhas do SCM a cada partida.
+func applyPolicy(s *mgr.Service) error {
+	want := WantedPolicy()
+	ch := DiffPolicy(readPolicy(s), want)
+	var errs []error // tenta as três gravações e junta as falhas
+	if ch.Recovery {
+		var actions []mgr.RecoveryAction
+		for _, a := range want.Actions {
+			actions = append(actions, mgr.RecoveryAction{Type: mgr.ServiceRestart, Delay: a.Delay})
+		}
+		if err := s.SetRecoveryActions(actions, uint32(want.Reset.Seconds())); err != nil {
+			errs = append(errs, fmt.Errorf("configurando recuperação: %w", err))
+		}
+	}
+	// Run que termina com erro limpo vira SERVICE_STOPPED com código de saída,
+	// não crash: sem este flag a recuperação não dispararia.
+	if ch.NonCrash {
+		if err := s.SetRecoveryActionsOnNonCrashFailures(want.NonCrash); err != nil {
+			errs = append(errs, fmt.Errorf("configurando recuperação em falhas sem crash: %w", err))
+		}
+	}
+	if ch.Preshutdown {
+		info := struct{ PreshutdownTimeout uint32 }{uint32(want.Preshutdown / time.Millisecond)}
+		if err := windows.ChangeServiceConfig2(s.Handle, windows.SERVICE_CONFIG_PRESHUTDOWN_INFO,
+			(*byte)(unsafe.Pointer(&info))); err != nil {
+			errs = append(errs, fmt.Errorf("configurando tempo de preshutdown: %w", err))
+		}
+	}
+	return errors.Join(errs...)
+}
+
+// EnsurePolicy reaplica a política do SCM ao serviço VPNMonitor (só o que
+// diverge). O serviço chama na partida: é o que garante a política numa
+// instalação pelo MSI. O SYSTEM tem acesso total ao serviço pela ACE do grupo
+// Administradores (BA) do descritor padrão do SCM.
+func EnsurePolicy() error { return ensurePolicyNamed(ServiceName) }
+
+func ensurePolicyNamed(name string) error {
+	scm, err := windows.OpenSCManager(nil, nil, windows.SC_MANAGER_CONNECT)
+	if err != nil {
+		return err
+	}
+	defer windows.CloseServiceHandle(scm)
+	n, err := windows.UTF16PtrFromString(name)
+	if err != nil {
+		return err
+	}
+	// Direitos mínimos; SERVICE_START é exigido por ChangeServiceConfig2 ao
+	// definir ações SC_ACTION_RESTART.
+	h, err := windows.OpenService(scm, n,
+		windows.SERVICE_QUERY_CONFIG|windows.SERVICE_CHANGE_CONFIG|windows.SERVICE_START)
+	if err != nil {
+		return err
+	}
+	s := &mgr.Service{Name: name, Handle: h}
+	defer s.Close()
+	return applyPolicy(s)
 }
 
 // Uninstall para o serviço (sem derrubar VPNs) e remove o registro.

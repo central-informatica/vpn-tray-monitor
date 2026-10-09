@@ -28,7 +28,7 @@ func defaultDataDir() (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return filepath.Join(pd, "VPNMonitor"), nil
+	return filepath.Join(pd, config.DataDirName), nil
 }
 
 // realPlatform monta as implementações Windows.

@@ -1,0 +1,40 @@
+# Notas de release (git-cliff, commits convencionais em pt-BR). A release usa
+# `git cliff --latest --strip header`: só a seção da tag atual. Numa final, o
+# release.yml troca o tag_pattern por GIT_CLIFF__GIT__TAG_PATTERN (só finais),
+# para as notas cobrirem tudo desde a final anterior, rc incluídas.
+[changelog]
+header = "# Mudanças\n"
+body = """
+{% if version %}\
+## {{ version | trim_start_matches(pat="v") }} — {{ timestamp | date(format="%Y-%m-%d") }}
+{% else %}\
+## Não lançado
+{% endif %}\
+{% for group, commits in commits | group_by(attribute="group") %}
+### {{ group | striptags | trim | upper_first }}
+{% for commit in commits %}
+- {% if commit.scope %}**{{ commit.scope }}:** {% endif %}{{ commit.message | upper_first }} ({{ commit.id | truncate(length=7, end="") }})\
+{% endfor %}
+{% endfor %}\n
+"""
+trim = true
+
+[git]
+conventional_commits = true
+filter_unconventional = true
+split_commits = false
+commit_parsers = [
+  { message = "^feat", group = "<!-- 0 -->Novidades" },
+  { message = "^fix", group = "<!-- 1 -->Correções" },
+  { message = "^perf", group = "<!-- 2 -->Desempenho" },
+  { message = "^refactor", group = "<!-- 3 -->Refatoração" },
+  { message = "^docs", group = "<!-- 4 -->Documentação" },
+  { message = "^(build|ci)", group = "<!-- 5 -->Build e CI" },
+  { message = "^test", group = "<!-- 6 -->Testes" },
+  { message = "^chore\\(release\\)", skip = true },
+  { message = "^chore", group = "<!-- 7 -->Diversos" },
+]
+protect_breaking_commits = true
+filter_commits = false
+tag_pattern = "^v[0-9]+\\.[0-9]+\\.[0-9]+(-rc\\.[0-9]+)?$"
+sort_commits = "oldest"

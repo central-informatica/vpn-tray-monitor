@@ -160,3 +160,23 @@ func TestStateRejectionsOptionalAndRoundTrip(t *testing.T) {
 		t.Fatalf("rejections vazio deveria ser omitido: %s", b)
 	}
 }
+
+// Os nomes são o contrato com o MSI (installer/Product.wxs) e com quem
+// implanta por GPO/Intune: mudar um deles quebra instalações existentes.
+func TestSeedValueNames(t *testing.T) {
+	want := []string{"VPN_ENTRY", "VPN_NAME", "CHECK_KIND", "CHECK_HOST", "CHECK_PORT", "INTERVAL"}
+	got := SeedValueNames()
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("%v", got)
+	}
+	var s Seed
+	for i, v := range s.values() {
+		*v.dst = want[i]
+	}
+	if s != (Seed{VPNEntry: "VPN_ENTRY", VPNName: "VPN_NAME", CheckKind: "CHECK_KIND", CheckHost: "CHECK_HOST", CheckPort: "CHECK_PORT", Interval: "INTERVAL"}) {
+		t.Fatalf("campos trocados: %+v", s)
+	}
+	if SeedRegistryPath != `SOFTWARE\VPNMonitor\Seed` {
+		t.Fatal(SeedRegistryPath)
+	}
+}

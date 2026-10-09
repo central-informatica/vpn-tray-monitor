@@ -26,7 +26,7 @@ import (
 const usage = `uso: vpnmon-svc <comando>
 
   run                                  modo console, para depurar
-  status                               estado de cada VPN (via pipe)
+  status [--json]                      estado de cada VPN (via pipe)
   check <vpn>                          verificação única, sem discar; sai com 1
                                        se sem rede, enlace caído ou alvo falhando
   vpn add --name N --entry E [--check ping|tcp|link] [--host H] [--port P]
@@ -69,6 +69,9 @@ type env struct {
 	// dados nasceria com dono = conta do usuário e a pasta inteira iria para a
 	// quarentena na partida seguinte do serviço.
 	adminOwner func() error
+	// ensurePolicy reaplica a política do SCM (recuperação e preshutdown) ao
+	// serviço; chamado na partida do serviço (svc.EnsurePolicy).
+	ensurePolicy func() error
 }
 
 func defaultEnv() env {
@@ -85,7 +88,7 @@ func defaultEnv() env {
 			return ipc.Handshake(c, version)
 		},
 		platform: realPlatform, install: svc.Install, uninstall: svc.Uninstall,
-		isService: svc.IsService, runService: svc.Run, now: time.Now,
+		isService: svc.IsService, runService: svc.Run, ensurePolicy: svc.EnsurePolicy, now: time.Now,
 		interrupt: func(ctx context.Context) (context.Context, context.CancelFunc) {
 			return signal.NotifyContext(ctx, os.Interrupt)
 		},
@@ -169,7 +172,7 @@ func dispatch(args []string, e env) error {
 // são tratados antes, em dispatch.
 var commands = map[string]func(rest []string, e env) error{
 	"run":     noArgs("run", cmdRun),
-	"status":  noArgs("status", cmdStatus),
+	"status":  cmdStatus,
 	"check":   cmdCheck,
 	"vpn":     cmdVPN,
 	"install": noArgs("install", cmdInstall),

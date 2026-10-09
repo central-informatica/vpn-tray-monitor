@@ -37,14 +37,32 @@ func listenTestPipe(t *testing.T) string {
 	return name
 }
 
+// pipeDACL lê a DACL do pipe pelo nome. O GetNamedSecurityInfo abre o pipe
+// com CreateFile, que falha com ERROR_PIPE_BUSY ("All pipe instances are
+// busy") enquanto nenhuma instância espera cliente: a primeira instância do
+// winio.ListenPipe recusa clientes até o primeiro Accept da goroutine, e
+// entre um Accept e o seguinte também não há instância livre. Repete como o
+// winio.DialPipeContext (e portanto o ipc.Dial) faz, a cada 10 ms até o prazo.
+func pipeDACL(t *testing.T, name string) *windows.SECURITY_DESCRIPTOR {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		sd, err := windows.GetNamedSecurityInfo(name, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION)
+		if err == nil {
+			return sd
+		}
+		if !errors.Is(err, windows.ERROR_PIPE_BUSY) || time.Now().After(deadline) {
+			t.Fatal(err)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
 // Só no job Windows: a DACL efetiva do pipe nega Rede e dá a Usuários
 // Interativos leitura e escrita SEM FILE_CREATE_PIPE_INSTANCE.
 func TestWindowsPipeDACL(t *testing.T) {
 	name := listenTestPipe(t)
-	sd, err := windows.GetNamedSecurityInfo(name, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION)
-	if err != nil {
-		t.Fatal(err)
-	}
+	sd := pipeDACL(t, name)
 	s := sd.String()
 	if !strings.Contains(s, "(D;;") || !strings.Contains(s, ";;;NU)") {
 		t.Fatalf("Rede deveria ser negada: %s", s)

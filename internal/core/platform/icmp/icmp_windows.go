@@ -36,7 +36,7 @@ func (winPinger) Ping(ctx context.Context, host string, timeout time.Duration) (
 	if h == 0 || h == uintptr(windows.InvalidHandle) {
 		return Result{}, fmt.Errorf("IcmpCreateFile: %w", errno)
 	}
-	defer procIcmpCloseHandle.Call(h)
+	defer func() { _, _, _ = procIcmpCloseHandle.Call(h) }()
 
 	payload := make([]byte, payloadSize)
 	for i := range payload {

@@ -1,0 +1,264 @@
+# Release (spec §10.2): tag vX.Y.Z ou vX.Y.Z-rc.N num commit do main.
+# validate → CI inteiro (reaproveitado, com a tag como versão) → package
+# (Windows, environment "release": assinatura opcional, MSI, zip) → metadata
+# (SBOM, notas; só leitura) → publish (somas, proveniência, GitHub Release).
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+# `shell: bash` explícito = bash com pipefail (o padrão implícito é `bash -e`,
+# sem pipefail: `msiversion | tee` passaria verde com tag inválida). Os passos
+# PowerShell declaram `shell: pwsh` um a um.
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      semver: ${{ steps.version.outputs.semver }}
+      product: ${{ steps.version.outputs.product }}
+      prerelease: ${{ steps.version.outputs.prerelease }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # Credenciais mantidas (token só de leitura): o `git fetch` abaixo
+          # precisa delas se o repositório for privado.
+          fetch-depth: 0
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      - name: semver e limites da ProductVersion
+        id: version
+        run: go run ./tools/msiversion "$GITHUB_REF_NAME" | tee -a "$GITHUB_OUTPUT"
+      - name: o commit da tag está no main
+        run: |
+          git fetch --no-tags origin main
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
+            echo "::error::a tag $GITHUB_REF_NAME não aponta para um commit do main"
+            exit 1
+          fi
+
+  ci:
+    needs: validate
+    uses: ./.github/workflows/ci.yml
+    with:
+      version: ${{ github.ref_name }}
+    permissions:
+      contents: read
+      actions: read
+      security-events: write
+
+  package:
+    needs: [validate, ci]
+    runs-on: windows-latest
+    timeout-minutes: 30
+    # Secrets e vars da assinatura ficam no environment (com aprovação, se o
+    # time quiser).
+    environment: release
+    outputs:
+      # vars do environment só existem nos jobs dele: os seguintes leem daqui.
+      signed: ${{ steps.signing.outputs.signed }}
+      # SHA-256 do que sai daqui: o publish confere o que baixou contra eles
+      # antes de gerar SHA256SUMS e atestar.
+      msi_sha256: ${{ steps.hashes.outputs.msi_sha256 }}
+      zip_sha256: ${{ steps.hashes.outputs.zip_sha256 }}
+    env:
+      SEMVER: ${{ needs.validate.outputs.semver }}
+      PRODUCT: ${{ needs.validate.outputs.product }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # Os exes do job build do CI acima (mesma execução, versão = tag).
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: binarios
+          path: build
+      - name: assinatura ligada?
+        id: signing
+        shell: bash
+        env:
+          SIGNED: ${{ vars.SIGNING_ENABLED == 'true' }}
+        run: echo "signed=$SIGNED" >> "$GITHUB_OUTPUT"
+      - name: assina os exes
+        if: vars.SIGNING_ENABLED == 'true'
+        shell: pwsh
+        env:
+          SIGN_DLIB: ${{ vars.SIGN_DLIB }}
+          SIGN_DLIB_METADATA: ${{ vars.SIGN_DLIB_METADATA }}
+          SIGN_TIMESTAMP_URL: ${{ vars.SIGN_TIMESTAMP_URL }}
+          SIGN_EXPECTED_SHA1: ${{ vars.SIGN_EXPECTED_SHA1 }}
+        run: ./scripts/sign.ps1 -Path build/vpnmon-svc.exe, build/vpnmon-tray.exe
+      - name: MSI
+        shell: pwsh
+        run: ./scripts/build-msi.ps1 -Semver $env:SEMVER -ProductVersion $env:PRODUCT -BinDir build -OutDir dist
+      - name: assina o MSI
+        if: vars.SIGNING_ENABLED == 'true'
+        shell: pwsh
+        env:
+          SIGN_DLIB: ${{ vars.SIGN_DLIB }}
+          SIGN_DLIB_METADATA: ${{ vars.SIGN_DLIB_METADATA }}
+          SIGN_TIMESTAMP_URL: ${{ vars.SIGN_TIMESTAMP_URL }}
+          SIGN_EXPECTED_SHA1: ${{ vars.SIGN_EXPECTED_SHA1 }}
+        run: ./scripts/sign.ps1 -Path "dist/VPNMonitor-$env:SEMVER-x64.msi"
+      - name: zip portátil (exes, README, licença)
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force portatil | Out-Null
+          Copy-Item build/vpnmon-svc.exe, build/vpnmon-tray.exe, README.md, installer/LICENCA.txt portatil/
+          Compress-Archive -Path portatil/* -DestinationPath "dist/VPNMonitor-$env:SEMVER-x64-portatil.zip"
+      - name: SHA-256 dos artefatos publicados
+        id: hashes
+        shell: pwsh
+        run: |
+          $files = @(Get-ChildItem dist -File | Where-Object Extension -In '.msi', '.zip')
+          if ($files.Count -ne 2) { throw "dist deveria ter só o MSI e o zip: $($files.Name -join ', ')" }
+          $msi = (Get-FileHash "dist/VPNMonitor-$env:SEMVER-x64.msi" -Algorithm SHA256).Hash.ToLowerInvariant()
+          $zip = (Get-FileHash "dist/VPNMonitor-$env:SEMVER-x64-portatil.zip" -Algorithm SHA256).Hash.ToLowerInvariant()
+          "msi_sha256=$msi" >> $env:GITHUB_OUTPUT
+          "zip_sha256=$zip" >> $env:GITHUB_OUTPUT
+          Write-Host "$msi  VPNMonitor-$env:SEMVER-x64.msi"
+          Write-Host "$zip  VPNMonitor-$env:SEMVER-x64-portatil.zip"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release
+          path: |
+            dist/*.msi
+            dist/*.zip
+          if-no-files-found: error
+
+  # SBOM e notas num job só de leitura: o publish (com escrita) não roda
+  # ferramenta de terceiros sobre o histórico nem sobre os binários.
+  metadata:
+    needs: [validate, package]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      SEMVER: ${{ needs.validate.outputs.semver }}
+      SIGNED: ${{ needs.package.outputs.signed }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0 # git-cliff lê o histórico desde a tag anterior
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: release
+          path: dist
+      - name: exes do zip para o SBOM
+        run: unzip -q "dist/VPNMonitor-$SEMVER-x64-portatil.zip" -d sbom-input
+      - name: SBOM CycloneDX (syft)
+        uses: anchore/sbom-action@66cbf4bc1f1c0d2edc94016e65bc221b6bb0ad6c # v0.24.3
+        with:
+          path: sbom-input
+          format: cyclonedx-json
+          output-file: sbom/VPNMonitor-${{ env.SEMVER }}-sbom.cdx.json
+          upload-artifact: false
+          upload-release-assets: false
+      - name: notas (git-cliff)
+        uses: orhun/git-cliff-action@a9a95522b26fe6403f7bb24031f21fb573d0f5ff # v4.9.1
+        with:
+          config: cliff.toml
+          args: --latest --strip header
+        env:
+          OUTPUT: notas/notes.md
+          # Na final, só tags finais contam: as notas cobrem tudo desde a
+          # final anterior (com as rc no meio, ou com a final no mesmo commit
+          # da última rc, sairiam vazias ou parciais).
+          GIT_CLIFF__GIT__TAG_PATTERN: "${{ needs.validate.outputs.prerelease == 'false' && '^v[0-9]+\\.[0-9]+\\.[0-9]+$' || '^v[0-9]+\\.[0-9]+\\.[0-9]+(-rc\\.[0-9]+)?$' }}"
+      - name: aviso de binários não assinados
+        if: env.SIGNED != 'true'
+        run: |
+          {
+            echo
+            echo "> **Binários não assinados.** O Windows SmartScreen e alguns antivírus podem alertar; confira as somas em SHA256SUMS e a proveniência com \`gh attestation verify <arquivo> --repo $GITHUB_REPOSITORY\`."
+          } >> notas/notes.md
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: sbom
+          path: sbom/*.cdx.json
+          if-no-files-found: error
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: notas
+          path: notas/notes.md
+          if-no-files-found: error
+
+  publish:
+    needs: [validate, package, metadata]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write # criar a release
+      id-token: write # proveniência
+      attestations: write
+    env:
+      SEMVER: ${{ needs.validate.outputs.semver }}
+      PRERELEASE: ${{ needs.validate.outputs.prerelease }}
+    steps:
+      # Sem checkout: só artefatos desta execução; o gh usa GH_REPO.
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: release
+          path: dist
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: sbom
+          path: dist
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: notas
+          path: notas
+      - name: confere MSI e zip com os hashes do package
+        working-directory: dist
+        env:
+          MSI_SHA256: ${{ needs.package.outputs.msi_sha256 }}
+          ZIP_SHA256: ${{ needs.package.outputs.zip_sha256 }}
+        run: |
+          for h in "$MSI_SHA256" "$ZIP_SHA256"; do
+            if ! [[ "$h" =~ ^[0-9a-f]{64}$ ]]; then
+              echo "::error::hash do package ausente ou inválido: '$h'"
+              exit 1
+            fi
+          done
+          shopt -s nullglob
+          got=(*.msi *.zip)
+          if [ "${#got[@]}" -ne 2 ]; then
+            echo "::error::esperava só o MSI e o zip, veio: ${got[*]}"
+            exit 1
+          fi
+          printf '%s  %s\n' \
+            "$MSI_SHA256" "VPNMonitor-$SEMVER-x64.msi" \
+            "$ZIP_SHA256" "VPNMonitor-$SEMVER-x64-portatil.zip" | sha256sum --check --strict -
+      - name: SHA256SUMS
+        working-directory: dist
+        run: sha256sum -- *.msi *.zip *.cdx.json > SHA256SUMS && cat SHA256SUMS
+      - name: proveniência do build
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: |
+            dist/*.msi
+            dist/*.zip
+            dist/*.cdx.json
+            dist/SHA256SUMS
+      - name: GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          flags=()
+          if [ "$PRERELEASE" = "true" ]; then flags+=(--prerelease); fi
+          gh release create "$GITHUB_REF_NAME" dist/* \
+            --verify-tag --title "VPN Monitor $SEMVER" --notes-file notas/notes.md "${flags[@]}"

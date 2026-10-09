@@ -200,3 +200,30 @@ func TestRotationWhileTailHoldsLog(t *testing.T) {
 		t.Fatalf("Tail: %q %v", s, err)
 	}
 }
+
+// Rotação que falha não é tentada de novo a cada linha: só depois que o
+// arquivo crescer mais maxBytes/4.
+func TestFailedRotationNotRetriedEveryLine(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "vpnmon.log")
+	w, err := OpenRotating(p, 100, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer w.Close()
+	tries := 0
+	w.rename = func(from, to string) error {
+		if from == p {
+			tries++
+		}
+		return os.ErrPermission
+	}
+	for i := 0; i < 40; i++ {
+		if _, err := w.Write([]byte("0123456789\n")); err != nil { // 11 bytes
+			t.Fatal(err)
+		}
+	}
+	// 440 bytes: 1ª tentativa em ~100; depois a cada 25+ bytes (3 linhas).
+	if tries == 0 || tries > 15 {
+		t.Fatalf("tentativas de rename = %d", tries)
+	}
+}
