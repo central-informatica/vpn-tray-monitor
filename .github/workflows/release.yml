@@ -1,7 +1,7 @@
 # Release (spec §10.2): tag vX.Y.Z ou vX.Y.Z-rc.N num commit do main.
 # validate → CI inteiro (reaproveitado, com a tag como versão) → package
-# (Windows, environment "release": assinatura opcional, MSI, zip) → publish
-# (somas, SBOM, proveniência, notas, GitHub Release).
+# (Windows, environment "release": assinatura opcional, MSI, zip) → metadata
+# (SBOM, notas; só leitura) → publish (somas, proveniência, GitHub Release).
 name: release
 
 on:
@@ -15,9 +15,17 @@ concurrency:
 permissions:
   contents: read
 
+# `shell: bash` explícito = bash com pipefail (o padrão implícito é `bash -e`,
+# sem pipefail: `msiversion | tee` passaria verde com tag inválida). Os passos
+# PowerShell declaram `shell: pwsh` um a um.
+defaults:
+  run:
+    shell: bash
+
 jobs:
   validate:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     outputs:
       semver: ${{ steps.version.outputs.semver }}
       product: ${{ steps.version.outputs.product }}
@@ -25,6 +33,8 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          # Credenciais mantidas (token só de leitura): o `git fetch` abaixo
+          # precisa delas se o repositório for privado.
           fetch-depth: 0
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
@@ -53,17 +63,20 @@ jobs:
   package:
     needs: [validate, ci]
     runs-on: windows-latest
+    timeout-minutes: 30
     # Secrets e vars da assinatura ficam no environment (com aprovação, se o
     # time quiser).
     environment: release
     outputs:
-      # vars do environment só existem nos jobs dele: o publish lê daqui.
+      # vars do environment só existem nos jobs dele: os seguintes leem daqui.
       signed: ${{ steps.signing.outputs.signed }}
     env:
       SEMVER: ${{ needs.validate.outputs.semver }}
       PRODUCT: ${{ needs.validate.outputs.product }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       # Os exes do job build do CI acima (mesma execução, versão = tag).
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
@@ -82,6 +95,7 @@ jobs:
           SIGN_DLIB: ${{ vars.SIGN_DLIB }}
           SIGN_DLIB_METADATA: ${{ vars.SIGN_DLIB_METADATA }}
           SIGN_TIMESTAMP_URL: ${{ vars.SIGN_TIMESTAMP_URL }}
+          SIGN_EXPECTED_SHA1: ${{ vars.SIGN_EXPECTED_SHA1 }}
         run: ./scripts/sign.ps1 -Path build/vpnmon-svc.exe, build/vpnmon-tray.exe
       - name: MSI
         shell: pwsh
@@ -93,6 +107,7 @@ jobs:
           SIGN_DLIB: ${{ vars.SIGN_DLIB }}
           SIGN_DLIB_METADATA: ${{ vars.SIGN_DLIB_METADATA }}
           SIGN_TIMESTAMP_URL: ${{ vars.SIGN_TIMESTAMP_URL }}
+          SIGN_EXPECTED_SHA1: ${{ vars.SIGN_EXPECTED_SHA1 }}
         run: ./scripts/sign.ps1 -Path "dist/VPNMonitor-$env:SEMVER-x64.msi"
       - name: zip portátil (exes, README, licença)
         shell: pwsh
@@ -108,21 +123,20 @@ jobs:
             dist/*.zip
           if-no-files-found: error
 
-  publish:
+  # SBOM e notas num job só de leitura: o publish (com escrita) não roda
+  # ferramenta de terceiros sobre o histórico nem sobre os binários.
+  metadata:
     needs: [validate, package]
     runs-on: ubuntu-latest
-    permissions:
-      contents: write # criar a release
-      id-token: write # proveniência
-      attestations: write
+    timeout-minutes: 15
     env:
       SEMVER: ${{ needs.validate.outputs.semver }}
-      PRERELEASE: ${{ needs.validate.outputs.prerelease }}
       SIGNED: ${{ needs.package.outputs.signed }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0 # git-cliff lê o histórico desde a tag anterior
+          persist-credentials: false
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: release
@@ -134,25 +148,16 @@ jobs:
         with:
           path: sbom-input
           format: cyclonedx-json
-          output-file: dist/VPNMonitor-${{ env.SEMVER }}-sbom.cdx.json
+          output-file: sbom/VPNMonitor-${{ env.SEMVER }}-sbom.cdx.json
           upload-artifact: false
           upload-release-assets: false
-      - name: SHA256SUMS
-        working-directory: dist
-        run: sha256sum -- *.msi *.zip *.cdx.json > SHA256SUMS && cat SHA256SUMS
-      - name: proveniência do build
-        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
-        with:
-          subject-path: |
-            dist/*.msi
-            dist/*.zip
       - name: notas (git-cliff)
         uses: orhun/git-cliff-action@a9a95522b26fe6403f7bb24031f21fb573d0f5ff # v4.9.1
         with:
           config: cliff.toml
           args: --latest --strip header
         env:
-          OUTPUT: notes.md
+          OUTPUT: notas/notes.md
           # Na final, só tags finais contam: as notas cobrem tudo desde a
           # final anterior (com as rc no meio, ou com a final no mesmo commit
           # da última rc, sairiam vazias ou parciais).
@@ -163,12 +168,60 @@ jobs:
           {
             echo
             echo "> **Binários não assinados.** O Windows SmartScreen e alguns antivírus podem alertar; confira as somas em SHA256SUMS e a proveniência com \`gh attestation verify <arquivo> --repo $GITHUB_REPOSITORY\`."
-          } >> notes.md
+          } >> notas/notes.md
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: sbom
+          path: sbom/*.cdx.json
+          if-no-files-found: error
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: notas
+          path: notas/notes.md
+          if-no-files-found: error
+
+  publish:
+    needs: [validate, package, metadata]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write # criar a release
+      id-token: write # proveniência
+      attestations: write
+    env:
+      SEMVER: ${{ needs.validate.outputs.semver }}
+      PRERELEASE: ${{ needs.validate.outputs.prerelease }}
+    steps:
+      # Sem checkout: só artefatos desta execução; o gh usa GH_REPO.
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: release
+          path: dist
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: sbom
+          path: dist
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: notas
+          path: notas
+      - name: SHA256SUMS
+        working-directory: dist
+        run: sha256sum -- *.msi *.zip *.cdx.json > SHA256SUMS && cat SHA256SUMS
+      - name: proveniência do build
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: |
+            dist/*.msi
+            dist/*.zip
+            dist/*.cdx.json
+            dist/SHA256SUMS
       - name: GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
         run: |
           flags=()
           if [ "$PRERELEASE" = "true" ]; then flags+=(--prerelease); fi
           gh release create "$GITHUB_REF_NAME" dist/* \
-            --verify-tag --title "VPN Monitor $SEMVER" --notes-file notes.md "${flags[@]}"
+            --verify-tag --title "VPN Monitor $SEMVER" --notes-file notas/notes.md "${flags[@]}"
