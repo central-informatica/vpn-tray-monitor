@@ -140,6 +140,12 @@ O `PURGE=1` apaga só `C:\ProgramData\VPNMonitor`. As pastas
 que o serviço desconfiou e que renomeou, dados preservados — **não** são
 removidas pelo `PURGE=1`: apague-as à mão depois de conferir o conteúdo.
 
+Se o serviço estiver gravando no momento da desinstalação (por exemplo, logo
+depois de subir), o `PURGE=1` pode deixar a pasta para trás: o
+`RemoveFolderEx` do WiX lista os arquivos antes de o serviço parar. Para uma
+remoção garantida, pare o serviço antes (`sc.exe stop VPNMonitor`) ou apague a
+pasta à mão depois.
+
 Quem instalou à mão com `vpnmon-svc install` deve rodar
 `vpnmon-svc uninstall` antes de instalar o MSI.
 
